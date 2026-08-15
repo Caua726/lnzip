@@ -133,6 +133,96 @@ fn _sink(c as *u8, dictid as i64, src as *u8, off as i64, len as i64) as void {
     tok.tokset_add(&s.w, src, off, len);
 }
 
+// Seeding the host dictionary from a popularity list, because a corpus cannot
+// be trusted to contain the web in proportion.
+//
+// A crawl index is sorted by reversed domain, so any affordable sample of it
+// is an alphabetical slice. Ours has google.com and youtube.com and does not
+// have wikipedia.org, amazon.com or globo.com at all — not because they are
+// unpopular but because their letters were not in the shards that fit on the
+// disk. A host dictionary built from that is missing its most valuable
+// entries.
+//
+// A ranked domain list fixes exactly this, and only this: it says which sites
+// exist and how popular they are, which is what the host dictionary needs and
+// is precisely what a partial crawl cannot say. Paths and words still come
+// from the corpus, because a domain list knows nothing about them.
+//
+// The weight is SEED_TOP/rank, which is Zipf — the same shape real host
+// frequency has — so a seeded count and a counted one are on one scale rather
+// than two.
+let is i64 as SEED_TOP with imut = 2000000;
+
+fn seed_hosts(path as *u8, t as *tok.TokSet) as i64 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return 0; }
+
+    let is *u8 as chunk = mem.core.mmap_anon(CHUNK);
+    let is [512]u8 as line;
+    if (cast(i64, chunk) <= 0) { return 0; }
+
+    let is i64 as fill with mut = 0;
+    let is i64 as seeded with mut = 0;
+
+    while (1 == 1) {
+        let is i64 as got = io._read_fd(fd, chunk, CHUNK);
+        if (got <= 0) { break; }
+        let is i64 as i with mut = 0;
+        while (i < got) {
+            let is i64 as b = cast(i64, chunk[i]);
+            if (b == _NL) {
+                if (fill > 4) {
+                    // "rank,domain"
+                    let is i64 as comma with mut = 0 - 1;
+                    let is i64 as j with mut = 0;
+                    while (j < fill) {
+                        if (cast(i64, line[j]) == 44) { comma = j; j = fill; }
+                        else { j = j + 1; }
+                    }
+                    if (comma > 0) {
+                        let is i64 as rank with mut = 0;
+                        j = 0;
+                        while (j < comma) {
+                            let is i64 as c = cast(i64, line[j]);
+                            if (c >= 48 && c <= 57) { rank = rank * 10 + (c - 48); }
+                            j = j + 1;
+                        }
+                        if (rank > 0) {
+                            let is i64 as reps with mut = SEED_TOP / rank;
+                            if (reps < 1) { reps = 1; }
+                            // Each label of the domain, weighted by its rank.
+                            let is i64 as start with mut = comma + 1;
+                            j = comma + 1;
+                            while (j <= fill) {
+                                let is i64 as at_end with mut = 0;
+                                if (j == fill) { at_end = 1; }
+                                else { if (cast(i64, line[j]) == 46) { at_end = 1; } }
+                                if (at_end == 1) {
+                                    let is i64 as r with mut = 0;
+                                    while (r < reps) {
+                                        tok.tokset_add(t, cast(*u8, &line), start, j - start);
+                                        r = r + 1;
+                                    }
+                                    start = j + 1;
+                                }
+                                j = j + 1;
+                            }
+                            seeded = seeded + 1;
+                        }
+                    }
+                }
+                fill = 0;
+            } else {
+                if (fill < 500) { line[fill] = cast(u8, b); fill = fill + 1; }
+            }
+            i = i + 1;
+        }
+    }
+    io._close_fd(fd);
+    mem.core.munmap(chunk, CHUNK);
+    return seeded;
+}
+
 fn parse_int(s as *u8) as i64 {
     let is i64 as v with mut = 0;
     let is i64 as i with mut = 0;
@@ -218,7 +308,7 @@ fn _report_dict(name as *u8, t as *tok.TokSet, kept as i64) as void {
 fn main(argc as i64, argv as *u8) as i32 {
     env.init(argc, argv);
     if (env.argc() < 3) {
-        io.write_str(io.STDERR, "usage: train <corpus> <out.lnzm> [model_id] [tier]\n");
+        io.write_str(io.STDERR, "usage: train <corpus> <out.lnzm> [model_id] [tier] [domains.csv]\n");
         return 2;
     }
     let is *u8 as corpus  = env.argv(1);
@@ -250,6 +340,13 @@ fn main(argc as i64, argv as *u8) as i32 {
 
     let is counting.Counts as cnt with mut;
     let is model.Model as m with mut;
+
+    if (env.argc() > 5) {
+        let is i64 as sd = seed_hosts(env.argv(5), &sets.h);
+        io.write_str(io.STDOUT, "train: seeded ");
+        io.write_int(io.STDOUT, sd);
+        io.write_str(io.STDOUT, " ranked domains into the host dictionary\n");
+    }
 
     let is i64 as u1 = _pass(corpus, 0, &sets, &m, &cnt, cast(*i64, &seen), cast(*i64, &toolong));
     if (u1 < 0) { io.write_str(io.STDERR, "cannot read corpus\n"); return 3; }
