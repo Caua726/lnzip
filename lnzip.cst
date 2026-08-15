@@ -1,0 +1,11 @@
+// =======================================================
+// lnzip.cst — the barrel.
+//
+// Imports every module and defines nothing. Its only job is to be compiled
+// with `caustic -c`, which type-checks the whole library the way a consumer
+// linking it would, without needing a main. The test runner does exactly that
+// before it builds any suite: a module that stops compiling is caught once,
+// here, instead of once per test that happens to import it.
+// =======================================================
+
+use "core/errno.cst" as errno;

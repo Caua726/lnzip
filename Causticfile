@@ -1,0 +1,62 @@
+name "lnzip"
+version "0.1.0"
+author "Cauã Alvarenga Neves"
+
+// lnzip — build and test surface.
+//
+//   caustic-mk run test            every suite
+//   caustic-mk run test-opt        the same, through the optimizing backend
+//   caustic-mk run clean           build artifacts
+//   caustic-mk run distclean       generated assembly and objects too
+//
+// caustic-compact supplies the entropy substrate: the LZMA binary range coder
+// that entropy/rc.cst is derived from, the byte buffer, and — for the
+// benchmark — gzip, Brotli, Zstd, LZMA2 and LZ4 to measure against. It is
+// declared on the runner target, which is what makes caustic-mk clone it into
+// .caustic/deps before any suite needs it, pinned to a tag.
+//
+// caustic-net is deliberately NOT declared here. Only the redirect server
+// needs it, and it drags caustic-crypto in transitively; keeping it off the
+// library target leaves the codec free of network dependencies, fuzzable on
+// its own, and buildable for wasm32-wasi. It arrives with the server target.
+
+env_default "OPT" "-O1"
+
+// ── Targets ──────────────────────────────────────────────────────────
+
+target "run" {
+    src "tests/run.cst"
+    out "build/run"
+    depend "caustic-compact" in "https://github.com/Caua726/caustic-compact" tag "v0.1.0"
+}
+
+
+// ── Scripts ──────────────────────────────────────────────────────────
+
+// `build run` rather than a bare `caustic`: the dependency is resolved by the
+// build system, not by the script, so the clone happens once and the tag pin
+// is honoured.
+script "test" {
+    "caustic-mk build run"
+    "./build/run"
+}
+
+// The same suite through the optimizing backend, reported separately. "Passes
+// at -O0, fails at -O1" names a compiler regression rather than an lnzip bug,
+// and that distinction is worth a separate script.
+script "test-opt" {
+    "caustic-mk build run"
+    "./build/run ${OPT}"
+}
+
+script "clean" {
+    "rm -rf .caustic build"
+    "echo 'clean: build artifacts and resolved dependencies removed'"
+}
+
+script "distclean" {
+    "caustic-mk run clean"
+    "find . -name '*.cst.s' -delete"
+    "find . -name '*.cst.s.o' -delete"
+    "echo 'distclean: generated assembly and objects removed too'"
+}

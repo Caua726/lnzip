@@ -1,0 +1,69 @@
+// =======================================================
+// tests/test_errno.cst — the error codes are distinct, in range, and named.
+//
+// Small, but not ceremonial. Three things here are load-bearing for the whole
+// project and all three are the kind that break silently:
+//
+//   * The codes must stay inside -1900..-1999. lnzip links caustic-compact and
+//     caustic-net; a code that drifts into a neighbour's block gets reported
+//     under the wrong name and nothing fails.
+//   * They must be pairwise distinct. A copy-pasted duplicate collapses two
+//     failure modes into one and the loss is invisible at the call site.
+//   * err_name must cover every one of them. A code that falls through to
+//     "unknown error" is a code the redirect server cannot log usefully.
+//
+// Exit code is which check failed, per the house convention.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+use "std/io.cst"        as io;
+
+let is i64 as N with imut = 10;
+
+fn streq(a as *u8, b as *u8) as i64 {
+    let is i64 as i with mut = 0;
+    while (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    if (a[i] == 0 && b[i] == 0) { return 1; }
+    return 0;
+}
+
+fn main() as i32 {
+    let is [N]i64 as c;
+    c[0] = errno.E_TRUNC;
+    c[1] = errno.E_BADMODEL;
+    c[2] = errno.E_NOMODEL;
+    c[3] = errno.E_SPACE;
+    c[4] = errno.E_OOM;
+    c[5] = errno.E_BADCHAR;
+    c[6] = errno.E_LIMIT;
+    c[7] = errno.E_BADURL;
+    c[8] = errno.E_IO;
+    c[9] = errno.E_DESYNC;
+
+    // E_OK is the only non-negative one, and it must stay 0: callers test
+    // `rc < 0`, so a non-zero success code would read as failure nowhere and
+    // as garbage everywhere.
+    if (errno.E_OK != 0) { return 1; }
+
+    let is *u8 as unknown = errno.err_name(0 - 12345);
+    if (streq(unknown, "unknown error") == 0) { return 2; }
+
+    let is i64 as i with mut = 0;
+    while (i < N) {
+        if (c[i] > 0 - 1900) { return 3; }    // drifted above the block
+        if (c[i] < 0 - 1999) { return 4; }    // drifted below it
+        if (streq(errno.err_name(c[i]), unknown) == 1) { return 5; }   // unnamed
+        let is i64 as j with mut = i + 1;
+        while (j < N) {
+            if (c[i] == c[j]) { return 6; }   // duplicate
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    io.write_str(io.STDOUT, "errno: 10 codes, distinct, in range, all named\n");
+    return 0;
+}

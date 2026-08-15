@@ -1,0 +1,90 @@
+# lnzip
+
+A lossless compressor for URLs, written in Caustic.
+
+Not a URL shortener in the usual sense. A shortener is a database: `abc123` is
+a key, and the link dies when the table does. lnzip has no table — the code
+**is** the URL, compressed:
+
+```
+URL  →  compress    →  payload
+payload  →  decompress  →  the original URL, byte for byte
+```
+
+So `nosso.dominio/CODE` resolves by decoding `CODE`, not by looking it up. No
+storage, no expiry, no limit on how many links exist, and anyone holding the
+same model can resolve a link offline.
+
+## How it compresses
+
+It doesn't treat a URL as text. It knows the grammar —
+
+```
+scheme · host/subdomain/domain · path · query parameters · fragment
+```
+
+— and spends bits only on what is unpredictable. `https`, `/`, `?`, `=`, `&`,
+`#`, TLDs and common route shapes cost a fraction of a bit each or vanish
+entirely. Unknown text falls through to subword and character models, and
+digits, hex, UUIDs and Base64 get codecs shaped for them.
+
+The philosophy is closer to AV1 than to LZ4: exploit knowledge of what the
+data *is* rather than search it for repeats. A structural pass turns the URL
+into tokens, and a binary arithmetic coder with pre-trained, frozen
+probabilities turns those tokens into bits. The probability tables live in an
+external model file, so **not one byte of table rides in the payload** — which
+is what makes a 40-bit result possible at all.
+
+The models learn the *language* of URLs — domains, words, subwords, routes,
+parameters, distributions. They store no pages and no specific URLs.
+
+| Tier | Size |
+|---|---|
+| Tiny | ~2 MB |
+| Standard | ~25 MB |
+| Max | ~90 MB |
+
+## Output
+
+```
+Base64URL   maximum compatibility, drops into a URL path unescaped — 6 bits/char
+Unicode     fewest visible characters, CJK ideographs            — 14 bits/char
+```
+
+A 96-bit payload is 16 Base64URL characters or 7 CJK ones.
+
+## What it does not do
+
+Against a URL carrying a random identifier, **no compressor beats a database**
+— that is information theory, not engineering. `youtube.com/watch?v=dQw4w9WgXcQ`
+holds 66 bits of pure randomness in the ID; the best possible payload is about
+72 bits, or 12 Base64URL characters, where bit.ly spends 7. The same is true
+of ASINs, UUIDs and commit hashes.
+
+Where lnzip wins is structural and textual URLs — wikis, docs, GitHub, news,
+slugged product pages — and above all long URLs carrying `utm_*` and tracking
+parameters, which collapse from ~200 characters to ~10. And it wins on the
+thing a database cannot offer at any size: no state.
+
+The benchmark reports per category rather than hiding this in an average.
+
+## Status
+
+Early. See `docs/` for the design; the phases and their gates are tracked
+there. Nothing here is stable yet, and no model has been published — a model
+id, once published, is frozen forever, because a link minted today has to
+resolve in ten years.
+
+## Build
+
+```sh
+caustic-mk run test        # every suite
+caustic-mk run test-opt    # the same through the optimizing backend
+```
+
+Requires the Caustic toolchain (≥ v0.1.8) and network access on first build,
+to clone the pinned `caustic-compact`.
+
+## License
+
+MIT — Cauã Alvarenga Neves.

@@ -1,0 +1,12 @@
+.caustic/
+build/
+*.cst.s
+*.cst.s.o
+
+# Trained models are release assets, not source. Their sha256 lives in
+# models/MANIFEST, which IS tracked — a link whose model was lost is a dead
+# link, so the hashes have to be in the repository even when the bytes are not.
+models/*.lnzm
+
+# Corpus lives on the 2TB volume, never here.
+corpus/

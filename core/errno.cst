@@ -1,0 +1,75 @@
+// =======================================================
+// core/errno.cst — the error codes for lnzip.
+//
+// The house contract: every entry point returns a non-negative count on
+// success, or one of these negative codes on failure. There is no generic
+// Result type to return instead.
+//
+// The range is -1900..-1999, and it is chosen rather than convenient.
+// caustic-compact owns -1..-8, and caustic-net has -1000 (errno sentinels),
+// -1100 (bufread), -1200 (url), -1300 (http1), -1400 (dns), -1500..-1699
+// (tls), -1700 (cookie) and -1800 (the client block its README reserves for
+// growth). lnzip links both, so a code that collided would be reported under
+// the wrong name by whichever err_name saw it first — and every one of those
+// blocks is a plausible future neighbour. -1900 is past all of them.
+// =======================================================
+
+let is i64 as E_OK       with imut = 0;
+
+// The payload ran out mid-symbol: truncated code, or a code that was never
+// ours. Not a corruption diagnosis — the arithmetic decoder cannot tell the
+// difference, and must not pretend it can.
+let is i64 as E_TRUNC    with imut = 0 - 1900;
+
+// The model file failed its own integrity check: bad magic, unknown format
+// version, or a content hash that does not match the bytes. Always fatal,
+// never a warning: decoding a permanent link against a model that silently
+// changed produces a plausible wrong URL, which is worse than an error.
+let is i64 as E_BADMODEL with imut = 0 - 1901;
+
+// The payload names a model this build does not have. Distinct from
+// E_BADMODEL because it is recoverable by fetching that model, and a link
+// service wants to say so.
+let is i64 as E_NOMODEL  with imut = 0 - 1902;
+
+// Caller's buffer is too small. Same meaning as caustic-net's URL_ERR_SPACE.
+let is i64 as E_SPACE    with imut = 0 - 1903;
+
+let is i64 as E_OOM      with imut = 0 - 1904;
+
+// A character in the encoded code is outside the output alphabet.
+let is i64 as E_BADCHAR  with imut = 0 - 1905;
+
+// A hard decode limit was hit: output length, path segment count, token
+// length. The decoder is fed attacker-controlled input by the redirect
+// server, so every unbounded loop has a ceiling and the ceiling is an error,
+// not a truncation.
+let is i64 as E_LIMIT    with imut = 0 - 1906;
+
+// The splitter could not make sense of the input as a URL. Callers fall back
+// to raw mode rather than failing: the codec is lossless over all byte
+// strings, not only over well-formed URLs.
+let is i64 as E_BADURL   with imut = 0 - 1907;
+
+let is i64 as E_IO       with imut = 0 - 1908;
+
+// Encoder and decoder disagreed about what the model predicts. This can only
+// fire if a structural shortcut was emitted without verifying it reconstructs
+// — the one bug class that would silently corrupt links, so it is checked
+// rather than assumed.
+let is i64 as E_DESYNC   with imut = 0 - 1909;
+
+fn err_name(e as i64) as *u8 {
+    if (e == E_OK)       { return "ok"; }
+    if (e == E_TRUNC)    { return "truncated payload"; }
+    if (e == E_BADMODEL) { return "model failed integrity check"; }
+    if (e == E_NOMODEL)  { return "model not available"; }
+    if (e == E_SPACE)    { return "buffer too small"; }
+    if (e == E_OOM)      { return "out of memory"; }
+    if (e == E_BADCHAR)  { return "character outside output alphabet"; }
+    if (e == E_LIMIT)    { return "decode limit exceeded"; }
+    if (e == E_BADURL)   { return "input is not a parseable URL"; }
+    if (e == E_IO)       { return "io error"; }
+    if (e == E_DESYNC)   { return "encoder/decoder desync"; }
+    return "unknown error";
+}

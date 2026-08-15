@@ -1,0 +1,175 @@
+// =======================================================
+// tests/run.cst — the test runner, in Caustic.
+//
+// Compile-checks the library the way a consumer would, then builds and runs
+// every suite. A suite passes iff its binary exits 0; the runner exits 0 only
+// if all of them do.
+//
+// The compile-check comes first and is not redundant with the suites. A suite
+// only imports what it needs, so a module nothing tests yet can rot without
+// any suite noticing. `caustic -c lnzip.cst` type-checks all of them at once.
+//
+// Dependencies resolve through .caustic/deps, which caustic-mk populates from
+// the `depend` on the target that builds this file. That path is repo-relative
+// rather than a property of where the repositories sit on disk, so a clone of
+// lnzip alone builds and tests. Passing a --path that does not exist yet is
+// harmless.
+//
+// Run from the repo root:  caustic-mk run test
+// =======================================================
+
+use "std/process.cst" as proc;
+use "std/io.cst"      as io;
+use "std/os.cst"      as os;
+use "std/env.cst"     as env;
+use "std/string.cst"  as str;
+
+let is *u8 as DEPS with imut = ".caustic/deps";
+
+// An optimization level to build every case with, or none for the default.
+let is *u8 as OPT with mut = cast(*u8, 0);
+
+fn app(buf as *u8, pos as i64, s as *u8) as i64 {
+    let is i64 as p with mut = pos;
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) { buf[p] = s[i]; p = p + 1; i = i + 1; }
+    return p;
+}
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+fn label(name as *u8) as void {
+    io.write_str(1, "[test] ");
+    io.write_str(1, name);
+    let is i64 as pad with mut = 20 - slen(name);
+    while (pad > 0) { io.write_str(1, " "); pad = pad - 1; }
+}
+
+// Resolve `file` against $PATH into out (proc.capture runs via execve, which
+// needs a real path). Tries a bare name and a .exe suffix. Returns 1 if found.
+fn which(file as *u8, out as *u8) as i32 {
+    let is *u8 as path = env.getenv("PATH");
+    if (cast(i64, path) == 0) { return 0; }
+    let is i64 as i with mut = 0;
+    while (path[i] != 0) {
+        let is i64 as start = i;
+        while (path[i] != 0 && path[i] != 58 && path[i] != 59) { i = i + 1; }   // ':' or ';'
+        let is i64 as q with mut = 0;
+        let is i64 as k with mut = start;
+        while (k < i) { out[q] = path[k]; q = q + 1; k = k + 1; }
+        out[q] = cast(u8, 47); q = q + 1;                                       // '/'
+        q = app(out, q, file);
+        out[q] = cast(u8, 0);
+        if (io.exists(out) == 1) { return 1; }
+        out[q] = cast(u8, 46); out[q + 1] = cast(u8, 101);
+        out[q + 2] = cast(u8, 120); out[q + 3] = cast(u8, 101); out[q + 4] = cast(u8, 0);   // ".exe"
+        if (io.exists(out) == 1) { return 1; }
+        if (path[i] != 0) { i = i + 1; }
+    }
+    return 0;
+}
+
+// Send this process's stderr to the null device, so children inherit a quiet
+// stderr. proc.capture already swallows a child's stdout (and on Windows its
+// stderr too); this covers the one case it doesn't: a child's stderr on POSIX.
+fn silence_stderr() as void {
+    let is *u8 as nul with mut = "/dev/null";
+    if (os.current() == os.OS_WINDOWS) { return; }
+    io._close_fd(2);
+    io._open_write(nul);
+}
+
+// `caustic -c` on the barrel. Success is detected the same way run_case does
+// it — by the artifact appearing — because proc.capture reports the child's
+// output, not its status. The compiler always emits <src>.s, so that file
+// existing after an unlink is exactly "the compile succeeded".
+fn compile_check(cc as *u8) as i32 {
+    label("lnzip.cst -c");
+    io.unlink("lnzip.cst.s");
+
+    let is [8]i64 as cav;
+    let is i64 as n with mut = 0;
+    cav[n] = cast(i64, "caustic"); n = n + 1;
+    cav[n] = cast(i64, "--path");  n = n + 1;
+    cav[n] = cast(i64, DEPS);      n = n + 1;
+    cav[n] = cast(i64, "-c");      n = n + 1;
+    cav[n] = cast(i64, "lnzip.cst"); n = n + 1;
+    cav[n] = 0;
+    let is str.String as _log = proc.capture(cc, cast(*u8, &cav));
+
+    if (io.exists("lnzip.cst.s") == 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
+    io.write_str(1, "PASS\n");
+    return 0;
+}
+
+fn run_case(cc as *u8, name as *u8, src as *u8) as i32 {
+    let is [512]u8 as out;
+    let is i64 as p with mut = app(cast(*u8, &out), 0, "build/");
+    p = app(cast(*u8, &out), p, name);
+    out[p] = cast(u8, 0);
+
+    label(name);
+    io.unlink(cast(*u8, &out));
+
+    let is [8]i64 as cav;
+    let is i64 as n with mut = 0;
+    cav[n] = cast(i64, "caustic"); n = n + 1;
+    cav[n] = cast(i64, "--path");  n = n + 1;
+    cav[n] = cast(i64, DEPS);      n = n + 1;
+    if (cast(i64, OPT) != 0) { cav[n] = cast(i64, OPT); n = n + 1; }
+    cav[n] = cast(i64, src);       n = n + 1;
+    cav[n] = cast(i64, "-o");      n = n + 1;
+    cav[n] = cast(i64, cast(*u8, &out)); n = n + 1;
+    cav[n] = 0;
+    let is str.String as _log = proc.capture(cc, cast(*u8, &cav));
+
+    if (io.exists(cast(*u8, &out)) == 0) { io.write_str(1, "COMPILE FAIL\n"); return 1; }
+
+    let is [2]i64 as rav;
+    rav[0] = cast(i64, cast(*u8, &out)); rav[1] = 0;
+    let is i64 as rpid = proc.spawnp(cast(*u8, &out), cast(*u8, &rav));
+    let is i32 as rc = proc.wait_pid(rpid);
+    if (rc == 0) { io.write_str(1, "PASS\n"); return 0; }
+    io.write_str(1, "FAIL (exit "); io.write_int(1, cast(i64, rc)); io.write_str(1, ")\n");
+    return 1;
+}
+
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);
+    let is [4096]u8 as cc;
+    if (which("caustic", cast(*u8, &cc)) == 0) {
+        io.write_str(1, "caustic not found in PATH\n");
+        return 2;
+    }
+    let is *u8 as ccp = cast(*u8, &cc);
+
+    let is i64 as ai with mut = 1;
+    while (ai < env.argc()) {
+        let is *u8 as a = env.argv(ai);
+        if (a[0] == 45 && a[1] == 79) { OPT = a; }               // "-O…"
+        else {
+            io.write_str(1, "usage: run [-O0|-O1|-O2]\n");
+            return 2;
+        }
+        ai = ai + 1;
+    }
+    if (cast(i64, OPT) != 0) {
+        io.write_str(1, "optimization: "); io.write_str(1, OPT); io.write_str(1, "\n");
+    }
+    silence_stderr();
+
+    let is i64 as fail with mut = 0;
+
+    // ── the library type-checks as a consumer would link it ───────
+    fail = fail + cast(i64, compile_check(ccp));
+
+    // ── the substrate ─────────────────────────────────────────────
+    fail = fail + cast(i64, run_case(ccp, "test_errno", "tests/test_errno.cst"));
+
+
+    if (fail == 0) { io.write_str(1, "all green\n"); return 0; }
+    io.write_str(1, "FAILURES: "); io.write_int(1, fail); io.write_str(1, "\n");
+    return 1;
+}
