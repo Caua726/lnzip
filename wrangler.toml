@@ -1,0 +1,24 @@
+# lnzip.de — a static-assets Worker, and nothing else.
+#
+# There is no script here on purpose. The whole product is four files and a
+# model: the code lives in the fragment, a fragment is never sent to a server,
+# and so there is nothing for a server to do. Cloudflare bills for Worker
+# execution and serves static assets free and unlimited, which is not a
+# discount we found — it is the shape of the architecture showing up on the
+# invoice.
+#
+# The route takes precedence over the zone's origin, so publishing does not
+# touch DNS and unpublishing is deleting one route.
+#
+#   npx wrangler deploy
+#
+name = "lnzip"
+account_id = "5d187caf46287ea7cdbbc5f6593e6e82"
+compatibility_date = "2026-08-15"
+
+[assets]
+directory = "build/site"
+
+[[routes]]
+pattern = "lnzip.de/*"
+zone_name = "lnzip.de"

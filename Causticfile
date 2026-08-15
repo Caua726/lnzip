@@ -83,6 +83,10 @@ script "web" {
     "cp web/index.html web/lnzip.js web/qr.js build/"
     "cp models/enpt2.lnzm build/standard.lnzm"
     "./build/bundle web/index.html build/lnzip.wasm build/lnzip.html"
+    "mkdir -p build/site"
+    "cp web/index.html web/lnzip.js web/qr.js web/_headers build/site/"
+    "cp build/lnzip.wasm build/site/"
+    "cp models/enpt2.lnzm build/site/standard.lnzm"
 }
 
 // ── Scripts ──────────────────────────────────────────────────────────

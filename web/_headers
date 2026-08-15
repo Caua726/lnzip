@@ -1,0 +1,17 @@
+# A published model is frozen forever — its id names the statistics a link was
+# coded against, and links are permanent — so `immutable` here is not an
+# optimisation but a statement of fact. A reader fetches the model once and
+# never revalidates it, because there is nothing it could ever revalidate to.
+/lnzip.wasm
+  Cache-Control: public, max-age=31536000, immutable
+
+/standard.lnzm
+  Cache-Control: public, max-age=31536000, immutable
+
+# The page itself does change, and a stale one that mints links against a model
+# it no longer ships would be the one way this design can produce a dead link.
+/index.html
+  Cache-Control: public, max-age=300
+
+/
+  Cache-Control: public, max-age=300
