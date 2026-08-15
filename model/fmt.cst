@@ -76,13 +76,15 @@ struct Model {
     dpath as dict.Dict;
     dkey  as dict.Dict;
     dval  as dict.Dict;
+    dword as dict.Dict;
 }
 
 fn model_dict(m as *Model, id as i64) as *dict.Dict {
     if (id == ctx.DICT_HOST) { return &m.dhost; }
     if (id == ctx.DICT_PATH) { return &m.dpath; }
     if (id == ctx.DICT_KEY)  { return &m.dkey; }
-    return &m.dval;
+    if (id == ctx.DICT_VAL)  { return &m.dval; }
+    return &m.dword;
 }
 
 // Little-endian readers that assume nothing about alignment. The section table

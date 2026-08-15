@@ -40,15 +40,45 @@ use "std/mem.cst" only bins, core as mem;
 let is i64 as CHUNK with imut = 1048576;
 let is i64 as _NL   with imut = 10;
 
-// How many entries each dictionary keeps. Chosen from coverage measured on a
-// held-out corpus: at these sizes a host dictionary accounts for 98.8% of host
-// bytes and a key dictionary for 94.8% of query-key bytes, while path segments
-// reach 37.9% and query values 22.7%. Past these the tail is long and flat,
-// and every entry still costs space in a file a browser has to download.
-let is i64 as N_HOST with imut = 4096;
-let is i64 as N_PATH with imut = 8192;
-let is i64 as N_KEY  with imut = 1024;
-let is i64 as N_VAL  with imut = 4096;
+// How many entries each dictionary keeps, per tier. These are measured rather
+// than chosen, and the measurement had a surprise in it: past a point a bigger
+// dictionary is not merely wasteful, it is WORSE. Keeping every distinct token
+// the corpus contains scored 32% where a dictionary a third the size scored
+// 31%, because the entries that newly hit are rare ones, and a rank around
+// 100000 costs some 34 bits — more than spelling the word out. A dictionary
+// has an optimum, not a ceiling.
+//
+// Measured on held-out data, with the sub-word dictionary at 65536:
+//
+//   tier      model   transferred   of original   mean/URL
+//   tiny      2.8 MB      568 KB        39%          61 B
+//   standard  5.7 MB      2.3 MB        31%          48 B
+//   (all)    13.2 MB      5.8 MB        32%          50 B   <- worse, and 2.5x
+//
+// The tier is a tax on the reader, not on the writer: a link names its model,
+// so everyone who follows it must have that model. That is why the default is
+// the small one.
+fn dict_size(tier as i64, which as i64) as i64 {
+    if (tier == 0) {
+        if (which == ctx.DICT_HOST) { return 4096; }
+        if (which == ctx.DICT_PATH) { return 8192; }
+        if (which == ctx.DICT_KEY)  { return 1024; }
+        if (which == ctx.DICT_VAL)  { return 4096; }
+        return 16384;
+    }
+    if (tier == 1) {
+        if (which == ctx.DICT_HOST) { return 4096; }
+        if (which == ctx.DICT_PATH) { return 32768; }
+        if (which == ctx.DICT_KEY)  { return 1024; }
+        if (which == ctx.DICT_VAL)  { return 16384; }
+        return 65536;
+    }
+    if (which == ctx.DICT_HOST) { return 16384; }
+    if (which == ctx.DICT_PATH) { return 131072; }
+    if (which == ctx.DICT_KEY)  { return 4096; }
+    if (which == ctx.DICT_VAL)  { return 65536; }
+    return 262144;
+}
 
 let is i64 as TAB_SLOTS with imut = 1048576;    // 2^20
 let is i64 as TAB_ARENA with imut = 33554432;   // 32 MB of token bytes
@@ -58,6 +88,7 @@ struct Sets {
     p as tok.TokSet;
     k as tok.TokSet;
     v as tok.TokSet;
+    w as tok.TokSet;
 }
 
 fn _sink(c as *u8, dictid as i64, src as *u8, off as i64, len as i64) as void {
@@ -65,7 +96,8 @@ fn _sink(c as *u8, dictid as i64, src as *u8, off as i64, len as i64) as void {
     if (dictid == ctx.DICT_HOST) { tok.tokset_add(&s.h, src, off, len); return; }
     if (dictid == ctx.DICT_PATH) { tok.tokset_add(&s.p, src, off, len); return; }
     if (dictid == ctx.DICT_KEY)  { tok.tokset_add(&s.k, src, off, len); return; }
-    tok.tokset_add(&s.v, src, off, len);
+    if (dictid == ctx.DICT_VAL)  { tok.tokset_add(&s.v, src, off, len); return; }
+    tok.tokset_add(&s.w, src, off, len);
 }
 
 fn parse_int(s as *u8) as i64 {
@@ -167,6 +199,10 @@ fn main(argc as i64, argv as *u8) as i32 {
         io.write_str(io.STDERR, "model_id must be 0..7\n");
         return 2;
     }
+    if (tier < 0 || tier > 2) {
+        io.write_str(io.STDERR, "tier must be 0 (tiny), 1 (standard) or 2 (max)\n");
+        return 2;
+    }
 
     let is [1]i64 as seen;    seen[0] = 0;
     let is [1]i64 as toolong; toolong[0] = 0;
@@ -177,6 +213,7 @@ fn main(argc as i64, argv as *u8) as i32 {
     if (tok.tokset_new(&sets.p, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
     if (tok.tokset_new(&sets.k, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
     if (tok.tokset_new(&sets.v, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+    if (tok.tokset_new(&sets.w, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
 
     let is counting.Counts as cnt with mut;
     let is model.Model as m with mut;
@@ -189,27 +226,31 @@ fn main(argc as i64, argv as *u8) as i32 {
 
     // ── build the dictionaries ────────────────────────────────────
     let is cb.Bytes as dblob with mut = cb.bytes_new(1048576);
-    let is [5]i64 as dofs;
+    let is [6]i64 as dofs;
     dofs[0] = 0;
-    if (tok.tokset_emit(&sets.h, N_HOST, &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.h, dict_size(tier, ctx.DICT_HOST), &dblob) < 0) { return 3; }
     dofs[1] = dblob.len;
-    if (tok.tokset_emit(&sets.p, N_PATH, &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.p, dict_size(tier, ctx.DICT_PATH), &dblob) < 0) { return 3; }
     dofs[2] = dblob.len;
-    if (tok.tokset_emit(&sets.k, N_KEY, &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.k, dict_size(tier, ctx.DICT_KEY), &dblob) < 0) { return 3; }
     dofs[3] = dblob.len;
-    if (tok.tokset_emit(&sets.v, N_VAL, &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.v, dict_size(tier, ctx.DICT_VAL), &dblob) < 0) { return 3; }
     dofs[4] = dblob.len;
+    if (tok.tokset_emit(&sets.w, dict_size(tier, ctx.DICT_WORD), &dblob) < 0) { return 3; }
+    dofs[5] = dblob.len;
 
     io.write_str(io.STDOUT, "train: dictionaries\n");
-    _report_dict("host ", &sets.h, N_HOST);
-    _report_dict("path ", &sets.p, N_PATH);
-    _report_dict("key  ", &sets.k, N_KEY);
-    _report_dict("value", &sets.v, N_VAL);
+    _report_dict("host ", &sets.h, dict_size(tier, ctx.DICT_HOST));
+    _report_dict("path ", &sets.p, dict_size(tier, ctx.DICT_PATH));
+    _report_dict("key  ", &sets.k, dict_size(tier, ctx.DICT_KEY));
+    _report_dict("value", &sets.v, dict_size(tier, ctx.DICT_VAL));
+    _report_dict("word ", &sets.w, dict_size(tier, ctx.DICT_WORD));
 
     tok.tokset_free(&sets.h);
     tok.tokset_free(&sets.p);
     tok.tokset_free(&sets.k);
     tok.tokset_free(&sets.v);
+    tok.tokset_free(&sets.w);
 
     // A model carrying only the dictionaries. Pass 2 needs them to know which
     // tokens will be ranks and which will be spelled out; it never touches the
@@ -256,7 +297,7 @@ fn main(argc as i64, argv as *u8) as i32 {
     io.write_str(io.STDOUT, " counted, "); io.write_int(io.STDOUT, toolong[0]);
     io.write_str(io.STDOUT, " over MAX_URL -> "); io.write_str(io.STDOUT, outpath);
     io.write_str(io.STDOUT, " (");  io.write_int(io.STDOUT, w);
-    io.write_str(io.STDOUT, " bytes, "); io.write_int(io.STDOUT, dofs[4]);
+    io.write_str(io.STDOUT, " bytes, "); io.write_int(io.STDOUT, dofs[ctx.NDICT]);
     io.write_str(io.STDOUT, " of it dictionaries, id "); io.write_int(io.STDOUT, model_id);
     io.write_str(io.STDOUT, ")\n");
 

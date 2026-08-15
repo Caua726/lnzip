@@ -70,19 +70,37 @@ The benchmark reports per category rather than hiding this in an average.
 
 ## Where it stands
 
-The structural grammar is in: components, and token dictionaries for hosts,
-path segments, query keys and query values. Percent-encoded content is not yet
-unpacked, and that is the next measured win.
+Components, whole-token dictionaries for hosts, path segments, query keys and
+values, and a shared sub-word dictionary underneath them.
 
-Measured on 14487 URLs held out of training (real browser history), each
-compressed on its own:
+Two numbers, and the second one matters more.
+
+On URLs held out at random from the training corpus — the same sites, different
+pages:
 
 | | of original | mean/URL |
 |---|---|---|
-| **lnzip** — structural, Tiny | **43.4%** | 67 B |
-| brotli q11 — its dictionary already holds URL fragments | 72.9% | 178 B |
-| gzip -9 | 76.9% | 188 B |
-| bzip2 -9 | 96.7% | 237 B |
+| **lnzip** — standard tier | **31%** | 48 B |
+| zstd -19 with a dictionary trained on the same corpus | 70.8% | 109 B |
+| brotli q11 — its dictionary already holds URL fragments | 76.9% | 119 B |
+| gzip -9 | 82.0% | 127 B |
+| bzip2 -9 | 109.4% — it *grows* | 169 B |
+
+On URLs from sites the model has never seen at all — the corpus split by domain
+rather than at random, which is the honest question of whether this works for
+anybody but the person whose history trained it:
+
+| | of original | mean/URL |
+|---|---|---|
+| **lnzip** | **51.2%** | 69.7 B |
+| zstd -19 + trained dictionary | 69.1% | 94.1 B |
+| brotli q11 | 76.6% | 104.4 B |
+| gzip -9 | 80.9% | 110.2 B |
+
+31% against 51% is the size of the overfit, and it is the most useful thing
+measured so far. The model is trained on one person's browsing — 5184 domains —
+so a site it has not seen costs twenty points. The fix is a broader corpus of
+real URLs, not a bigger dictionary.
 
 Getting there in order, so the cost of each idea is visible:
 
@@ -90,20 +108,32 @@ Getting there in order, so the cost of each idea is visible:
 |---|---|
 | order-2 character model | 57.8% |
 | + components coded separately | 57.3% |
-| + token dictionaries | 43.4% |
+| + whole-token dictionaries | 43.4% |
+| + shared sub-word dictionary | 39.7% |
+| + tuned dictionary sizes (standard tier) | 31.0% |
 
-Components on their own bought almost nothing, which was worth learning: at the
-character level the model already knew most of what a component boundary would
-have told it. The dictionaries bought a quarter, because a third of a URL is
-tokens that a few thousand entries account for completely — 4096 host entries
-cover 98.8% of host bytes.
+### A dictionary has an optimum, not a ceiling
 
-What is left is mostly not compressible, and the measurement says so plainly.
-59% of all bytes sit in the query string. Of the query values no dictionary
-reaches, 44% are opaque base64-ish identifiers — randomness by construction,
-and no model removes randomness. The other 42% are percent-encoded, three
-characters per byte and often an entire URL hiding inside a parameter, which is
-where the next real win is rather than in more context.
+Keeping every distinct token the corpus contains scores **worse** than keeping
+a third of them: 32% against 31%, for two and a half times the size. A token
+costs its rank, not its presence — a word around rank 100000 costs some 34 bits
+to name and about 32 to spell out, so past a point each new entry is a loss that
+also has to be downloaded.
+
+This is why a language dictionary would not help. `the` is the commonest word in
+English and is rare in URLs; `utm_source` is a word in no language and is one of
+the commonest tokens on the web. Only the corpus knows the frequencies that
+matter, and the frequencies are the whole mechanism.
+
+### Tiers
+
+A tier is a tax on the reader, not the writer: a link names its model, so
+everyone who follows it needs that model.
+
+| tier | model | transferred | of original |
+|---|---|---|---|
+| tiny | 2.8 MB | 568 KB | 39% |
+| standard | 5.7 MB | 2.3 MB | 31% |
 
 Losslessness is gated on a corpus rather than on chosen examples — 144874 real
 URLs, every one round-tripping byte for byte, run again on every change:

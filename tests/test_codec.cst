@@ -145,8 +145,10 @@ fn main() as i32 {
 
     // No dictionaries: every offset equal, so model_write emits no dictionary
     // sections at all and the model is one that spells every token out.
-    let is [5]i64 as dofs;
-    dofs[0] = 0; dofs[1] = 0; dofs[2] = 0; dofs[3] = 0; dofs[4] = 0;
+    // One entry per dictionary plus the total, so it must track ctx.NDICT.
+    let is [6]i64 as dofs;
+    let is i64 as di with mut = 0;
+    while (di <= ctx.NDICT) { dofs[di] = 0; di = di + 1; }
     if (model.model_write(MODEL_PATH, 3, model.TIER_TINY, probs,
                           cast(*u8, &dofs), cast(*i64, &dofs)) < 0) { return 32; }
 

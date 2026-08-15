@@ -208,28 +208,89 @@ fn _tok_count(src as *u8, off as i64, len as i64, delim as i64) as i64 {
     return n;
 }
 
+// A rank, once the hit bit has already been coded.
+fn _enc_rank(e as *rc.Enc, m as *model.Model, dictid as i64, rank as i64) as void {
+    // rank + 1, so that rank zero still has a bit-length.
+    let is i64 as v = rank + 1;
+    let is i64 as bucket = ctx.bitlen(v);
+    rc.enc_tree(e, m.probs, ctx.trank_base(dictid), ctx.RANK_BITS, bucket);
+    if (bucket > 1) { rc.enc_direct(e, v - (1 << (bucket - 1)), bucket - 1); }
+}
+
+// How many pieces a token breaks into. One more than the delimiters in it, so
+// an empty token is one empty piece and rejoining it gives back nothing.
+fn _sub_count(src as *u8, off as i64, len as i64) as i64 {
+    let is i64 as n with mut = 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (ctx.delim_id(cast(i64, src[off + i])) >= 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+// One piece of a token: the shared word dictionary, or spelled out.
+fn _enc_word(e as *rc.Enc, m as *model.Model, comp as i64,
+             src as *u8, off as i64, len as i64) as void {
+    let is *dict.Dict as d = model.model_dict(m, ctx.DICT_WORD);
+    let is i64 as rank = dict.dict_rank(d, src, off, len);
+    if (rank >= 0) {
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + ctx.DICT_WORD]), 1);
+        _enc_rank(e, m, ctx.DICT_WORD, rank);
+    } else {
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + ctx.DICT_WORD]), 0);
+        _enc_comp(e, m, src, off, len, comp);
+    }
+}
+
+// A token that missed its own dictionary, broken on the punctuation that joins
+// words. The delimiters are coded between the pieces, which is what makes the
+// split exactly invertible for any input.
+fn _enc_words(e as *rc.Enc, m as *model.Model, comp as i64,
+              src as *u8, off as i64, len as i64) as void {
+    _enc_len(e, m.probs, ctx.tcnt_base(ctx.DICT_WORD), _sub_count(src, off, len));
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) {
+            _enc_word(e, m, comp, src, off + start, i - start);
+        } else {
+            let is i64 as did = ctx.delim_id(cast(i64, src[off + i]));
+            if (did >= 0) {
+                _enc_word(e, m, comp, src, off + start, i - start);
+                rc.enc_tree(e, m.probs, ctx.CTX_DELIM, ctx.DELIM_BITS, did);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// The whole token first, sub-words on a miss. A slug is never in a dictionary
+// and the words in it always are.
 fn _enc_token(e as *rc.Enc, m as *model.Model, dictid as i64, comp as i64,
               src as *u8, off as i64, len as i64) as void {
     let is *dict.Dict as d = model.model_dict(m, dictid);
     let is i64 as rank = dict.dict_rank(d, src, off, len);
     if (rank >= 0) {
         rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + dictid]), 1);
-        // rank + 1, so that rank zero still has a bit-length.
-        let is i64 as v = rank + 1;
-        let is i64 as bucket = ctx.bitlen(v);
-        rc.enc_tree(e, m.probs, ctx.trank_base(dictid), ctx.RANK_BITS, bucket);
-        if (bucket > 1) { rc.enc_direct(e, v - (1 << (bucket - 1)), bucket - 1); }
-    } else {
-        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + dictid]), 0);
-        _enc_comp(e, m, src, off, len, comp);
+        _enc_rank(e, m, dictid, rank);
+        return;
     }
+    rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + dictid]), 0);
+    if (dictid == ctx.DICT_HOST || dictid == ctx.DICT_KEY) {
+        // Host labels and query keys are already 95%+ covered whole; breaking
+        // the few that miss buys nothing and costs a count field on each.
+        _enc_comp(e, m, src, off, len, comp);
+        return;
+    }
+    _enc_words(e, m, comp, src, off, len);
 }
 
-fn _dec_token(d as *rc.Dec, m as *model.Model, dictid as i64, comp as i64,
-              out as *u8, at as i64, max as i64) as i64 {
-    if (rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_THIT + dictid])) == 0) {
-        return _dec_comp(d, m, out, at, max, comp);
-    }
+// A rank and the bytes it names, written at out[at..]. Every bound is checked
+// before it is used: these numbers came out of a payload someone typed.
+fn _dec_rank(d as *rc.Dec, m as *model.Model, dictid as i64,
+             out as *u8, at as i64, max as i64) as i64 {
     let is i64 as bucket = rc.dec_tree(d, m.probs, ctx.trank_base(dictid), ctx.RANK_BITS);
     if (bucket == 0) { return errno.E_BADPAYLOAD; }
     if (bucket > 20) { return errno.E_LIMIT; }
@@ -247,6 +308,82 @@ fn _dec_token(d as *rc.Dec, m as *model.Model, dictid as i64, comp as i64,
     return tl[0];
 }
 
+fn _dec_word(d as *rc.Dec, m as *model.Model, comp as i64,
+             out as *u8, at as i64, max as i64) as i64 {
+    if (rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_THIT + ctx.DICT_WORD])) == 0) {
+        return _dec_comp(d, m, out, at, max, comp);
+    }
+    return _dec_rank(d, m, ctx.DICT_WORD, out, at, max);
+}
+
+fn _dec_words(d as *rc.Dec, m as *model.Model, comp as i64,
+              out as *u8, at as i64, max as i64) as i64 {
+    let is i64 as cnt = _dec_len(d, m.probs, ctx.tcnt_base(ctx.DICT_WORD));
+    if (cnt < 1) { return errno.E_BADPAYLOAD; }
+    if (cnt > us.MAX_URL) { return errno.E_LIMIT; }
+    let is i64 as w with mut = 0;
+    let is i64 as k with mut = 0;
+    while (k < cnt) {
+        if (k > 0) {
+            let is i64 as did = rc.dec_tree(d, m.probs, ctx.CTX_DELIM, ctx.DELIM_BITS);
+            let is i64 as ch = ctx.delim_char(did);
+            if (ch < 0) { return errno.E_BADPAYLOAD; }
+            if (at + w + 1 > max) { return errno.E_LIMIT; }
+            out[at + w] = cast(u8, ch);
+            w = w + 1;
+        }
+        let is i64 as n = _dec_word(d, m, comp, out, at + w, max);
+        if (n < 0) { return n; }
+        w = w + n;
+        k = k + 1;
+    }
+    return w;
+}
+
+fn _dec_token(d as *rc.Dec, m as *model.Model, dictid as i64, comp as i64,
+              out as *u8, at as i64, max as i64) as i64 {
+    if (rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_THIT + dictid])) == 1) {
+        return _dec_rank(d, m, dictid, out, at, max);
+    }
+    if (dictid == ctx.DICT_HOST || dictid == ctx.DICT_KEY) {
+        return _dec_comp(d, m, out, at, max, comp);
+    }
+    return _dec_words(d, m, comp, out, at, max);
+}
+
+fn _count_word(m as *model.Model, n0 as *i64, n1 as *i64, comp as i64,
+               src as *u8, off as i64, len as i64) as void {
+    let is *dict.Dict as d = model.model_dict(m, ctx.DICT_WORD);
+    let is i64 as rank = dict.dict_rank(d, src, off, len);
+    if (rank >= 0) {
+        n1[ctx.CTX_THIT + ctx.DICT_WORD] = n1[ctx.CTX_THIT + ctx.DICT_WORD] + 1;
+        _count_tree(n0, n1, ctx.trank_base(ctx.DICT_WORD), ctx.RANK_BITS, ctx.bitlen(rank + 1));
+    } else {
+        n0[ctx.CTX_THIT + ctx.DICT_WORD] = n0[ctx.CTX_THIT + ctx.DICT_WORD] + 1;
+        _count_comp(n0, n1, src, off, len, comp);
+    }
+}
+
+fn _count_words(m as *model.Model, n0 as *i64, n1 as *i64, comp as i64,
+                src as *u8, off as i64, len as i64) as void {
+    _count_len(n0, n1, ctx.tcnt_base(ctx.DICT_WORD), _sub_count(src, off, len));
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) {
+            _count_word(m, n0, n1, comp, src, off + start, i - start);
+        } else {
+            let is i64 as did = ctx.delim_id(cast(i64, src[off + i]));
+            if (did >= 0) {
+                _count_word(m, n0, n1, comp, src, off + start, i - start);
+                _count_tree(n0, n1, ctx.CTX_DELIM, ctx.DELIM_BITS, did);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
 fn _count_token(m as *model.Model, n0 as *i64, n1 as *i64, dictid as i64, comp as i64,
                 src as *u8, off as i64, len as i64) as void {
     let is *dict.Dict as d = model.model_dict(m, dictid);
@@ -254,10 +391,14 @@ fn _count_token(m as *model.Model, n0 as *i64, n1 as *i64, dictid as i64, comp a
     if (rank >= 0) {
         n1[ctx.CTX_THIT + dictid] = n1[ctx.CTX_THIT + dictid] + 1;
         _count_tree(n0, n1, ctx.trank_base(dictid), ctx.RANK_BITS, ctx.bitlen(rank + 1));
-    } else {
-        n0[ctx.CTX_THIT + dictid] = n0[ctx.CTX_THIT + dictid] + 1;
-        _count_comp(n0, n1, src, off, len, comp);
+        return;
     }
+    n0[ctx.CTX_THIT + dictid] = n0[ctx.CTX_THIT + dictid] + 1;
+    if (dictid == ctx.DICT_HOST || dictid == ctx.DICT_KEY) {
+        _count_comp(n0, n1, src, off, len, comp);
+        return;
+    }
+    _count_words(m, n0, n1, comp, src, off, len);
 }
 
 // A whole component as a delimited list of tokens.
@@ -686,6 +827,29 @@ fn _count_raw(src as *u8, len as i64, n0 as *i64, n1 as *i64) as void {
 // dictionaries the encoder then misses, and nothing would fail — the ratio
 // would just be worse for a reason no test could localise. Caustic has no
 // closures, so the sink takes an explicit context pointer.
+// A token, and — for the two dictionaries that fall back to sub-words — the
+// pieces it breaks into as well. Both are counted, because the encoder tries
+// both: the whole token first, its words if that misses.
+fn _walk_one(sink as *u8, sctx as *u8, dictid as i64,
+             src as *u8, off as i64, len as i64) as void {
+    call(sink, sctx, dictid, src, off, len);
+    if (dictid == ctx.DICT_HOST) { return; }
+    if (dictid == ctx.DICT_KEY)  { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) {
+            call(sink, sctx, ctx.DICT_WORD, src, off + start, i - start);
+        } else {
+            if (ctx.delim_id(cast(i64, src[off + i])) >= 0) {
+                call(sink, sctx, ctx.DICT_WORD, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
 fn _walk_toks(sink as *u8, sctx as *u8, src as *u8, off as i64, len as i64,
               delim as i64, dictid as i64) as void {
     if (len == 0) { return; }
@@ -693,10 +857,10 @@ fn _walk_toks(sink as *u8, sctx as *u8, src as *u8, off as i64, len as i64,
     let is i64 as i with mut = 0;
     while (i <= len) {
         if (i == len) {
-            call(sink, sctx, dictid, src, off + start, i - start);
+            _walk_one(sink, sctx, dictid, src, off + start, i - start);
         } else {
             if (cast(i64, src[off + i]) == delim) {
-                call(sink, sctx, dictid, src, off + start, i - start);
+                _walk_one(sink, sctx, dictid, src, off + start, i - start);
                 start = i + 1;
             }
         }
@@ -712,10 +876,10 @@ fn _walk_param(sink as *u8, sctx as *u8, src as *u8, off as i64, len as i64) as 
         else { i = i + 1; }
     }
     if (eq < 0) {
-        call(sink, sctx, ctx.DICT_KEY, src, off, len);
+        _walk_one(sink, sctx, ctx.DICT_KEY, src, off, len);
     } else {
-        call(sink, sctx, ctx.DICT_KEY, src, off, eq);
-        call(sink, sctx, ctx.DICT_VAL, src, off + eq + 1, len - eq - 1);
+        _walk_one(sink, sctx, ctx.DICT_KEY, src, off, eq);
+        _walk_one(sink, sctx, ctx.DICT_VAL, src, off + eq + 1, len - eq - 1);
     }
 }
 
