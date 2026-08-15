@@ -131,13 +131,24 @@ let is i64 as CTX_SFLAG with imut = 524305;    // CTX_CHAR + CHAR_N
 let is i64 as CTX_SLEN with imut = 524313;     // CTX_SFLAG + SFLAG_N
 let is i64 as SLEN_N   with imut = 128;        // NCOMP * LEN_N
 
-// The structural character model: the previous byte, and which component we
-// are inside. The same size as the raw model — 2048 contexts — but spending
-// the second dimension on where we are rather than on what came two bytes ago.
-// Inside a component the previous byte already carries most of the local
-// correlation; what it cannot say is that this is a host rather than a path.
+// The structural character model: the previous byte, the class of the one
+// before it, and which component we are inside.
+//
+// It began as order-1 — previous byte and component only — and that was the
+// wrong place to economise. Measurement says 11.2% of tokens miss every
+// dictionary and those tokens carry 79.8% of the bits: a slug of ordinary
+// Portuguese words is spelled out one character at a time, and this table is
+// what spells it. Everything else in the model is arguing over the other
+// fifth.
+//
+// 16384 contexts, four megabytes of probabilities. That sounds like the
+// budget until you measure how it travels: context tables deflate to about six
+// percent of their size, because most contexts are never visited and sit at
+// exactly one half, while a dictionary of opaque tokens deflates to sixty.
+// Spending the model on tables rather than on entries buys a model that is
+// both smaller in transit and sharper.
 let is i64 as CTX_SCHAR with imut = 524441;    // CTX_SLEN + SLEN_N
-let is i64 as SCHAR_N   with imut = 524288;    // NCOMP * 256 * CHAR_TREE
+let is i64 as SCHAR_N   with imut = 4194304;   // 256 * NCLASS * NCOMP * CHAR_TREE
 
 // ── region: the token dictionaries ───────────────────────────────────
 //
@@ -147,10 +158,10 @@ let is i64 as SCHAR_N   with imut = 524288;    // NCOMP * 256 * CHAR_TREE
 // costing anything at all. Path segments come in at 37.9% and query values at
 // 22.7% — worth having, and honest about the rest.
 //
-// A token is one hit bit, then its rank through a bit-length bucket. That
-// costs about two bits for a common token and 2*log2(rank) for a rare one,
-// which is the shape token frequency actually has. A miss costs the bit plus
-// the token spelled out through its component's character model.
+// A token is one hit bit, then its rank: the bit-length through a modelled
+// tree and the remainder raw, so about log2(rank) plus a couple of bits. A
+// miss costs the bit plus the token spelled out through its component's
+// character model.
 
 let is i64 as DICT_HOST with imut = 0;   // host labels, split on '.'
 let is i64 as DICT_PATH with imut = 1;   // path segments, split on '/'
@@ -179,22 +190,22 @@ let is i64 as COMP_KEY with imut = 7;
 let is i64 as RANK_BITS with imut = 5;    // bucket tree over the rank's bit-length
 let is i64 as RANK_N    with imut = 32;
 
-let is i64 as CTX_THIT with imut = 1048729;   // CTX_SCHAR + SCHAR_N; NDICT slots
-let is i64 as CTX_TCNT with imut = 1048734;   // token counts, NDICT * LEN_N
+let is i64 as CTX_THIT with imut = 4718745;   // CTX_SCHAR + SCHAR_N; NDICT slots
+let is i64 as CTX_TCNT with imut = 4718750;   // token counts, NDICT * LEN_N
 let is i64 as TCNT_N   with imut = 80;
-let is i64 as CTX_TRANK with imut = 1048814;  // NDICT * RANK_N
+let is i64 as CTX_TRANK with imut = 4718830;  // NDICT * RANK_N
 let is i64 as TRANK_N  with imut = 160;
-let is i64 as CTX_HASVAL with imut = 1048974; // a query parameter carries '='
+let is i64 as CTX_HASVAL with imut = 4718990; // a query parameter carries '='
 
 // Which punctuation joined two sub-tokens. Seven of them, so three bits, and
 // recording it is what makes the split exactly invertible: the pieces plus the
 // delimiters between them are the segment, byte for byte.
-let is i64 as CTX_DELIM with imut = 1048975;
+let is i64 as CTX_DELIM with imut = 4718991;
 let is i64 as DELIM_BITS with imut = 3;
 let is i64 as DELIM_N   with imut = 8;
 
 // The whole array.
-let is i64 as NPROBS with imut = 1048983;
+let is i64 as NPROBS with imut = 4718999;
 
 fn delim_id(c as i64) as i64 {
     if (c == 45)  { return 0; }    // -
@@ -218,8 +229,8 @@ fn delim_char(id as i64) as i64 {
     return 0 - 1;
 }
 
-fn schar_base(prev as i64, comp as i64) as i64 {
-    return CTX_SCHAR + ((prev * NCOMP) + comp) * CHAR_TREE;
+fn schar_base(p1 as i64, p2 as i64, comp as i64) as i64 {
+    return CTX_SCHAR + (((p1 * NCLASS + cls(p2)) * NCOMP) + comp) * CHAR_TREE;
 }
 
 fn slen_base(comp as i64) as i64 {

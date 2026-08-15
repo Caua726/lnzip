@@ -10,10 +10,15 @@
 // something worth four.
 //
 // TOKENS ARE ORDERED BY FREQUENCY, NOT ALPHABETICALLY. The rank is what gets
-// coded, through a bit-length bucket, so a common token costs a couple of bits
-// and a rare one costs about 2*log2(rank). That matches how token frequency
-// actually falls off, and it is why the dictionary can be large without the
-// tail costing anything to the head.
+// coded: its bit-length through a modelled tree, then the remaining bits raw.
+// That costs about log2(rank) plus the entropy of the bucket — a couple of
+// bits for a common token — which matches how token frequency actually falls
+// off, and is why the dictionary can be large without the tail costing
+// anything to the head.
+//
+// It is NOT 2*log2(rank); an earlier version of this comment said so, and the
+// mistake cost an outside review an entire recommendation to arithmetic-code
+// something already arithmetic-coded.
 //
 // The encoder needs string→rank and the decoder needs rank→string, which want
 // opposite orderings. Rather than store the tokens twice, the blob is in rank

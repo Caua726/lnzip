@@ -36,7 +36,14 @@ external model file, so **not one byte of table rides in the payload** — which
 is what makes a 40-bit result possible at all.
 
 The models learn the *language* of URLs — domains, words, subwords, routes,
-parameters, distributions. They store no pages and no specific URLs.
+parameters, distributions.
+
+They are not free of their corpus, and it is worth being exact about that. A
+dictionary holds the tokens a corpus actually contained, so a model trained on
+one person's browsing ends up holding fragments of what that person searched
+for. A published model must therefore be trained on public data and must
+require a token to have been seen many times, from many places, before it is
+eligible — a token that appeared once belongs to whoever typed it.
 
 | Tier | Size |
 |---|---|

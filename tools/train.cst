@@ -58,6 +58,17 @@ let is i64 as _NL   with imut = 10;
 // The tier is a tax on the reader, not on the writer: a link names its model,
 // so everyone who follows it must have that model. That is why the default is
 // the small one.
+//
+// How many sightings a token needs before it may enter a published dictionary.
+// This is a privacy floor before it is a quality one: a token seen once was
+// typed by one person, and a model that keeps it publishes it. A corpus of the
+// open web can afford a high floor; a small private corpus cannot afford any
+// dictionary at all.
+fn min_count(corpus_lines as i64) as i64 {
+    if (corpus_lines > 4000000) { return 8; }
+    if (corpus_lines > 500000)  { return 4; }
+    return 2;
+}
 fn dict_size(tier as i64, which as i64) as i64 {
     if (tier == 0) {
         if (which == ctx.DICT_HOST) { return 4096; }
@@ -247,18 +258,23 @@ fn main(argc as i64, argv as *u8) as i32 {
     io.write_int(io.STDOUT, u1); io.write_str(io.STDOUT, " urls tokenised\n");
 
     // ── build the dictionaries ────────────────────────────────────
+    let is i64 as floor = min_count(u1);
+    io.write_str(io.STDOUT, "train: a token needs ");
+    io.write_int(io.STDOUT, floor);
+    io.write_str(io.STDOUT, " sightings to enter a dictionary\n");
+
     let is cb.Bytes as dblob with mut = cb.bytes_new(1048576);
     let is [6]i64 as dofs;
     dofs[0] = 0;
-    if (tok.tokset_emit(&sets.h, dict_size(tier, ctx.DICT_HOST), &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.h, dict_size(tier, ctx.DICT_HOST), floor, &dblob) < 0) { return 3; }
     dofs[1] = dblob.len;
-    if (tok.tokset_emit(&sets.p, dict_size(tier, ctx.DICT_PATH), &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.p, dict_size(tier, ctx.DICT_PATH), floor, &dblob) < 0) { return 3; }
     dofs[2] = dblob.len;
-    if (tok.tokset_emit(&sets.k, dict_size(tier, ctx.DICT_KEY), &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.k, dict_size(tier, ctx.DICT_KEY), floor, &dblob) < 0) { return 3; }
     dofs[3] = dblob.len;
-    if (tok.tokset_emit(&sets.v, dict_size(tier, ctx.DICT_VAL), &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.v, dict_size(tier, ctx.DICT_VAL), floor, &dblob) < 0) { return 3; }
     dofs[4] = dblob.len;
-    if (tok.tokset_emit(&sets.w, dict_size(tier, ctx.DICT_WORD), &dblob) < 0) { return 3; }
+    if (tok.tokset_emit(&sets.w, dict_size(tier, ctx.DICT_WORD), floor, &dblob) < 0) { return 3; }
     dofs[5] = dblob.len;
 
     io.write_str(io.STDOUT, "train: dictionaries\n");

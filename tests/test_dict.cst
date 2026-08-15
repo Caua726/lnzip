@@ -65,8 +65,21 @@ fn main() as i32 {
     }
     if (t.used != NTOK) { return 2; }
 
+    // The floor really excludes: every token here was inserted a different
+    // number of times, from NTOK down to 1, so a floor of 3 must drop exactly
+    // the two rarest.
+    let is cb.Bytes as fb with mut = cb.bytes_new(4096);
+    if (tok.tokset_emit(&t, NTOK, 3, &fb) < 0) { return 7; }
+    let is dict.Dict as fd with mut;
+    if (dict.dict_attach(&fd, fb.ptr, fb.len) != 0) { return 8; }
+    if (fd.count != NTOK - 2) { return 9; }
+    cb.bytes_free(&fb);
+
     let is cb.Bytes as blob with mut = cb.bytes_new(4096);
-    let is i64 as n = tok.tokset_emit(&t, NTOK, &blob);
+    // A floor of 1 keeps every token, which is what this test is about. A
+    // published dictionary uses a real floor — see train/tokens.cst for why
+    // that is a privacy property before it is a quality one.
+    let is i64 as n = tok.tokset_emit(&t, NTOK, 1, &blob);
     if (n < 0)          { return 3; }
     if (n != blob.len)  { return 4; }
 

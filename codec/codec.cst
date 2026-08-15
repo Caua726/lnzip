@@ -165,10 +165,12 @@ fn _enc_comp(e as *rc.Enc, m as *model.Model, src as *u8,
              off as i64, len as i64, comp as i64) as void {
     _enc_len(e, m.probs, ctx.slen_base(comp), len);
     let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
     let is i64 as i with mut = 0;
     while (i < len) {
         let is i64 as c = cast(i64, src[off + i]);
-        rc.enc_tree(e, m.probs, ctx.schar_base(p1, comp), 8, c);
+        rc.enc_tree(e, m.probs, ctx.schar_base(p1, p2, comp), 8, c);
+        p2 = p1;
         p1 = c;
         i = i + 1;
     }
@@ -183,10 +185,12 @@ fn _dec_comp(d as *rc.Dec, m as *model.Model, out as *u8,
     if (at + len > max) { return errno.E_LIMIT; }
 
     let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
     let is i64 as i with mut = 0;
     while (i < len) {
-        let is i64 as c = rc.dec_tree(d, m.probs, ctx.schar_base(p1, comp), 8);
+        let is i64 as c = rc.dec_tree(d, m.probs, ctx.schar_base(p1, p2, comp), 8);
         out[at + i] = cast(u8, c);
+        p2 = p1;
         p1 = c;
         i = i + 1;
     }
@@ -197,10 +201,12 @@ fn _count_comp(n0 as *i64, n1 as *i64, src as *u8,
                off as i64, len as i64, comp as i64) as void {
     _count_len(n0, n1, ctx.slen_base(comp), len);
     let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
     let is i64 as i with mut = 0;
     while (i < len) {
         let is i64 as c = cast(i64, src[off + i]);
-        _count_tree(n0, n1, ctx.schar_base(p1, comp), 8, c);
+        _count_tree(n0, n1, ctx.schar_base(p1, p2, comp), 8, c);
+        p2 = p1;
         p1 = c;
         i = i + 1;
     }

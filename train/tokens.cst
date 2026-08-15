@@ -136,9 +136,20 @@ fn _by_bytes(a as i64, b as i64) as i64 {
     return dict.dict_cmp(_tok_ptr(a), _sorting.ln[a], _tok_ptr(b), _sorting.ln[b]);
 }
 
-// Serialise the top `want` tokens as a dictionary, appended to `out`.
-// Returns the number of bytes written, or negative.
-fn tokset_emit(t as *TokSet, want as i64, out as *cb.Bytes) as i64 {
+// Serialise the top `want` tokens as a dictionary, appended to `out`. A token
+// must have been seen at least `floor` times to be eligible.
+//
+// The floor is not a tuning knob, it is the difference between a dictionary
+// and a transcript. A token that appeared once in the corpus appeared because
+// one person typed it, and putting it in a published model publishes it — a
+// model trained on browsing history without this filter contains that person's
+// searches, their session identifiers and their account numbers, verbatim and
+// recoverable. Requiring many sightings is what makes a dictionary a statement
+// about a language rather than about a person.
+//
+// It also improves the model. A token seen once contributes nothing but a rank
+// that pushes every commoner token down.
+fn tokset_emit(t as *TokSet, want as i64, floor as i64, out as *cb.Bytes) as i64 {
     let is i64 as start = out.len;
 
     // Gather the occupied slots.
@@ -147,7 +158,9 @@ fn tokset_emit(t as *TokSet, want as i64, out as *cb.Bytes) as i64 {
     let is i64 as n with mut = 0;
     let is i64 as i with mut = 0;
     while (i < t.cap) {
-        if (t.at[i] != 0) { idx[n] = i; n = n + 1; }
+        if (t.at[i] != 0) {
+            if (t.cnt[i] >= floor) { idx[n] = i; n = n + 1; }
+        }
         i = i + 1;
     }
 
