@@ -1,0 +1,165 @@
+// =======================================================
+// tools/bundle.cst — one file that is the whole product.
+//
+//   caustic-mk build bundle
+//   ./build/bundle web/index.html web/lnzip.js build/lnzip.wasm build/lnzip.html
+//
+// Inlines the shim and the module into the page, so the result opens from
+// file:// with no server and no network. That is not only a convenience for
+// development: a page that needs nothing from anywhere is a page that can be
+// audited, saved, and served from a bucket, and the claim it makes — that the
+// fragment never leaves the browser — becomes something a reader can check
+// rather than take on trust.
+//
+// Two substitutions, both anchored on exact strings that exist in the source
+// page and are checked for. A silent no-op here would produce a page that
+// looks right and fetches from the network, which is the one failure this
+// tool must not have.
+// =======================================================
+
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/io.cst"  as io;
+use "std/env.cst" as env;
+use "std/mem.cst" only bins, core as mem;
+
+fn b64chars() as *u8 {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+}
+
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+
+fn slurp(path as *u8, out_len as *i64) as *u8 {
+    let is i64 as size = io.file_size(path);
+    if (size <= 0) { out_len[0] = 0; return cast(*u8, 0); }
+    let is *u8 as buf = mem.core.mmap_anon(size);
+    if (cast(i64, buf) <= 0) { out_len[0] = 0; return cast(*u8, 0); }
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { out_len[0] = 0; return cast(*u8, 0); }
+    let is i64 as got with mut = 0;
+    while (got < size) {
+        let is i64 as n = io._read_fd(fd, cast(*u8, cast(i64, buf) + got), size - got);
+        if (n <= 0) { break; }
+        got = got + n;
+    }
+    io._close_fd(fd);
+    out_len[0] = got;
+    return buf;
+}
+
+// First offset of `needle` in `hay`, or -1.
+fn find(hay as *u8, hlen as i64, needle as *u8) as i64 {
+    let is i64 as nlen = slen(needle);
+    if (nlen == 0)    { return 0 - 1; }
+    if (nlen > hlen)  { return 0 - 1; }
+    let is i64 as i with mut = 0;
+    while (i + nlen <= hlen) {
+        let is i64 as j with mut = 0;
+        while (j < nlen) {
+            if (hay[i + j] != needle[j]) { break; }
+            j = j + 1;
+        }
+        if (j == nlen) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn append(b as *cb.Bytes, src as *u8, from as i64, to as i64) as void {
+    let is i64 as i with mut = from;
+    while (i < to) { cb.bytes_push(b, src[i]); i = i + 1; }
+}
+
+fn append_str(b as *cb.Bytes, s as *u8) as void {
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) { cb.bytes_push(b, s[i]); i = i + 1; }
+}
+
+// Standard Base64, with padding and the +/ alphabet — atob() wants that one,
+// not the URL-safe alphabet the payloads use.
+fn b64_std(b as *cb.Bytes, src as *u8, n as i64) as void {
+    let is *u8 as A = b64chars();
+    let is i64 as i with mut = 0;
+    while (i + 2 < n) {
+        let is i64 as v = (cast(i64, src[i]) << 16) | (cast(i64, src[i + 1]) << 8) | cast(i64, src[i + 2]);
+        cb.bytes_push(b, A[(v >> 18) & 63]);
+        cb.bytes_push(b, A[(v >> 12) & 63]);
+        cb.bytes_push(b, A[(v >> 6) & 63]);
+        cb.bytes_push(b, A[v & 63]);
+        i = i + 3;
+    }
+    let is i64 as rest = n - i;
+    if (rest == 1) {
+        let is i64 as v = cast(i64, src[i]) << 16;
+        cb.bytes_push(b, A[(v >> 18) & 63]);
+        cb.bytes_push(b, A[(v >> 12) & 63]);
+        cb.bytes_push(b, cast(u8, 61));
+        cb.bytes_push(b, cast(u8, 61));
+    }
+    if (rest == 2) {
+        let is i64 as v = (cast(i64, src[i]) << 16) | (cast(i64, src[i + 1]) << 8);
+        cb.bytes_push(b, A[(v >> 18) & 63]);
+        cb.bytes_push(b, A[(v >> 12) & 63]);
+        cb.bytes_push(b, A[(v >> 6) & 63]);
+        cb.bytes_push(b, cast(u8, 61));
+    }
+}
+
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);
+    if (env.argc() < 5) {
+        io.write_str(io.STDERR, "usage: bundle <index.html> <lnzip.js> <lnzip.wasm> <out.html>\n");
+        return 2;
+    }
+
+    let is [1]i64 as hn;  let is *u8 as html = slurp(env.argv(1), cast(*i64, &hn));
+    let is [1]i64 as jn;  let is *u8 as js   = slurp(env.argv(2), cast(*i64, &jn));
+    let is [1]i64 as wn;  let is *u8 as wasm = slurp(env.argv(3), cast(*i64, &wn));
+    if (cast(i64, html) == 0) { io.write_str(io.STDERR, "cannot read page\n");   return 3; }
+    if (cast(i64, js) == 0)   { io.write_str(io.STDERR, "cannot read shim\n");   return 3; }
+    if (cast(i64, wasm) == 0) { io.write_str(io.STDERR, "cannot read module\n"); return 3; }
+
+    let is *u8 as TAG = "<script src=\"lnzip.js\"></script>";
+    let is *u8 as SLOT = "const WASM_B64 = \"\";";
+
+    let is i64 as at_tag  = find(html, hn[0], TAG);
+    let is i64 as at_slot = find(html, hn[0], SLOT);
+    if (at_tag < 0) {
+        io.write_str(io.STDERR, "page does not contain the script tag to inline\n");
+        return 4;
+    }
+    if (at_slot < 0) {
+        io.write_str(io.STDERR, "page does not contain the WASM_B64 slot\n");
+        return 4;
+    }
+    if (at_slot < at_tag) {
+        io.write_str(io.STDERR, "the WASM_B64 slot must come after the script tag\n");
+        return 4;
+    }
+
+    let is cb.Bytes as out with mut = cb.bytes_new(hn[0] + jn[0] + (wn[0] / 3) * 4 + 8192);
+
+    append(&out, html, 0, at_tag);
+    append_str(&out, "<script>\n");
+    append(&out, js, 0, jn[0]);
+    append_str(&out, "\n</script>");
+    append(&out, html, at_tag + slen(TAG), at_slot);
+    append_str(&out, "const WASM_B64 = \"");
+    b64_std(&out, wasm, wn[0]);
+    append_str(&out, "\";");
+    append(&out, html, at_slot + slen(SLOT), hn[0]);
+
+    let is i64 as w = io.write_file_atomic(env.argv(4), out.ptr, out.len);
+    if (w < 0) { io.write_str(io.STDERR, "write failed\n"); return 5; }
+
+    io.write_str(io.STDOUT, "bundle: page "); io.write_int(io.STDOUT, hn[0]);
+    io.write_str(io.STDOUT, " + shim ");      io.write_int(io.STDOUT, jn[0]);
+    io.write_str(io.STDOUT, " + wasm ");      io.write_int(io.STDOUT, wn[0]);
+    io.write_str(io.STDOUT, " -> ");          io.write_int(io.STDOUT, out.len);
+    io.write_str(io.STDOUT, " bytes, self-contained -> ");
+    io.write_str(io.STDOUT, env.argv(4));     io.write_str(io.STDOUT, "\n");
+    return 0;
+}

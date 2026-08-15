@@ -21,8 +21,16 @@
 
 use "../core/errno.cst" as errno;
 
-let is *u8 as _ALPHA with imut =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+// Returned from a function rather than held in a global, and that is not a
+// style choice. The wasm backend does not initialise a global declared as a
+// string literal — `let is *u8 as T with imut = "..."` leaves T pointing at
+// its own slot instead of at the bytes, with or without `imut`, so every read
+// comes back zero. A literal returned from a function is materialised
+// correctly. The same shape is what the embedded model generator emits, for
+// the same reason.
+fn _alpha() as *u8 {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+}
 
 // Character to value, by arithmetic rather than a table: a 256-byte lookup
 // would need lazy initialisation and a heap, to save nothing measurable on
@@ -57,14 +65,14 @@ fn b64_encode(src as *u8, n as i64, out as *u8, max as i64) as i64 {
         acc = (acc << 8) | cast(i64, src[i]);
         nbits = nbits + 8;
         while (nbits >= 6) {
-            out[w] = _ALPHA[(acc >> (nbits - 6)) & 63];
+            out[w] = _alpha()[(acc >> (nbits - 6)) & 63];
             w = w + 1;
             nbits = nbits - 6;
         }
         i = i + 1;
     }
     if (nbits > 0) {
-        out[w] = _ALPHA[(acc << (6 - nbits)) & 63];
+        out[w] = _alpha()[(acc << (6 - nbits)) & 63];
         w = w + 1;
     }
     return w;

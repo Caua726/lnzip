@@ -179,6 +179,19 @@ fn _parse(m as *Model) as i64 {
     return 0;
 }
 
+// Adopt a model that is already in memory, without taking ownership of the
+// bytes. This is how the browser build works: the model is deflated into the
+// wasm module, inflated once at start-up, and handed here. Nothing is copied
+// and model_free will not unmap it.
+fn model_attach(m as *Model, base as *u8, size as i64) as i64 {
+    m.base = base;
+    m.size = size;
+    m.owned = 0;
+    let is i64 as rc0 = _parse(m);
+    if (rc0 != 0) { m.base = cast(*u8, 0); }
+    return rc0;
+}
+
 fn model_open(m as *Model, path as *u8) as i64 {
     m.base = cast(*u8, 0);
     m.owned = 0;

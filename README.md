@@ -11,9 +11,9 @@ URL  →  compress    →  payload
 payload  →  decompress  →  the original URL, byte for byte
 ```
 
-So `nosso.dominio/CODE` resolves by decoding `CODE`, not by looking it up. No
+So `lnzip.de#CODE` resolves by decoding `CODE`, not by looking it up. No
 storage, no expiry, no limit on how many links exist, and anyone holding the
-same model can resolve a link offline.
+same model can resolve a link offline — including with no network at all.
 
 ## How it compresses
 
@@ -101,6 +101,34 @@ has to resolve in ten years. Nothing is published yet, and the format is still
 free to move.
 
 See `docs/design.md` for the phases and their gates.
+
+## lnzip.de
+
+The code lives in the fragment:
+
+```
+lnzip.de#SJtqoP1y7FFuuAEaikNiYgXfmg4nm-aZ
+```
+
+A fragment is never sent to a server. The destination URL therefore never
+reaches any infrastructure at all — the page decompresses it in the reader's
+browser and sends them on. That is not a policy about logs; there is nothing to
+log with. No shortener holding a database can offer the same, at any price.
+
+The whole thing is one static file that opens from `file://` with no server and
+no network: the codec compiled to WebAssembly with the model deflated inside
+it, a WASI shim of about fifty lines, and the page.
+
+```sh
+caustic-mk run web        # -> build/lnzip.html, self-contained
+node web/test.js          # optional: checks the wasm boundary
+```
+
+Only `http` and `https` are ever navigated to, and that check runs inside the
+wasm rather than in the page script — with no database behind it a fragment
+resolves to whatever it decodes to, so the check is the difference between a
+shortener and a `javascript:` delivery mechanism. A code that decodes to
+anything else is shown as inert text.
 
 ## Use
 

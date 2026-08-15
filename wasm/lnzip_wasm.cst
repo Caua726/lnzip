@@ -1,0 +1,199 @@
+// =======================================================
+// wasm/lnzip_wasm.cst — the browser ABI.
+//
+//   caustic --target=wasm32-wasi --path .caustic/deps wasm/lnzip_wasm.cst -o build/lnzip.wasm
+//
+// Everything a page needs, and nothing else. The functions here are top-level
+// in the entry file, which is what gets them exported under their own names —
+// anything reached through an import comes out mangled with the absolute build
+// path, which is no use as an interface.
+//
+// Types are i64 throughout, because the wasm backend widens i32 to i64 in the
+// exported signature regardless of what the source says. Declaring i32 would
+// not remove the BigInt at the JavaScript boundary, only hide where it is —
+// so the shim converts in one place and the ABI says what it means.
+//
+// The protocol is two fixed buffers rather than an allocator. Write the input
+// at wasm_inbuf(), call, read the output at wasm_outbuf(). It fits in one line
+// of JavaScript, there is nothing to leak, and the sizes involved — a URL is
+// at most 8 KB — make a general allocator pure ceremony.
+//
+// WHY THIS EXISTS AT ALL. The code lives in the fragment: lnzip.de#CODE. A
+// fragment is never sent to the server, so the destination URL never reaches
+// any infrastructure of ours — there is nothing to log, because there is
+// nothing to log with. That is a privacy guarantee no shortener holding a
+// database can make, and it is only possible because the decoder runs here,
+// in the reader's browser.
+// =======================================================
+
+use "../core/errno.cst"  as errno;
+use "../model/fmt.cst"   as model;
+use "../codec/codec.cst" as codec;
+use "../fmt/b64url.cst"  as b64;
+use "../fmt/uni.cst"     as uni;
+use "../url/split.cst"   as us;
+use "./model_embedded.cst" as embedded;
+use "caustic-compact/core/bytes.cst" as cb;
+
+let is i64 as CAP with imut = 65536;
+
+let is [65536]u8 as _IN;
+let is [65536]u8 as _OUT;
+
+let is model.Model as _M with mut;
+let is i64 as _ready with mut = 0;
+
+let is cb.Bytes as _PAY with mut;
+let is i64 as _pay_ready with mut = 0;
+
+fn wasm_inbuf()  as i64 { return cast(i64, cast(i64, &_IN)); }
+fn wasm_outbuf() as i64 { return cast(i64, cast(i64, &_OUT)); }
+fn wasm_cap()    as i64 { return cast(i64, CAP); }
+fn wasm_max_url() as i64 { return cast(i64, us.MAX_URL); }
+
+// Inflate the embedded model and adopt it. Idempotent, and cheap to call
+// again — a page may want to defer it until the user actually does something.
+fn wasm_init() as i64 {
+    if (_ready == 1) { return 0; }
+    let is *u8 as bytes_ = embedded.model_bytes();
+    if (cast(i64, bytes_) == 0) { return cast(i64, errno.E_BADMODEL); }
+    let is i64 as rc0 = model.model_attach(&_M, bytes_, embedded.model_size());
+    if (rc0 != 0) { return cast(i64, rc0); }
+    _ready = 1;
+    return 0;
+}
+
+fn wasm_model_id() as i64 {
+    if (_ready == 0) { return cast(i64, 0 - 1); }
+    return cast(i64, _M.model_id);
+}
+
+fn _pay() as *cb.Bytes {
+    if (_pay_ready == 0) {
+        _PAY = cb.bytes_new(16384);
+        _pay_ready = 1;
+    }
+    return &_PAY;
+}
+
+// URL of `len` bytes at wasm_inbuf() -> code at wasm_outbuf().
+// `unicode` selects the CJK alphabet over Base64URL. Returns the number of
+// bytes written (UTF-8 bytes, for the Unicode alphabet), or a negative errno.
+fn wasm_encode(len as i64, unicode as i64) as i64 {
+    if (_ready == 0) {
+        let is i64 as rc1 = wasm_init();
+        if (rc1 != 0) { return rc1; }
+    }
+    let is i64 as n = cast(i64, len);
+    if (n <= 0)         { return cast(i64, errno.E_BADURL); }
+    if (n > us.MAX_URL) { return cast(i64, errno.E_BADURL); }
+
+    let is *cb.Bytes as p = _pay();
+    cb.bytes_reset(p);
+    let is i64 as w = codec.lnz_encode(cast(*u8, &_IN), n, &_M, p);
+    if (w < 0) { return cast(i64, w); }
+
+    let is i64 as c with mut = 0;
+    if (unicode == 1) { c = uni.uni_encode(p.ptr, p.len, cast(*u8, &_OUT), CAP); }
+    else              { c = b64.b64_encode(p.ptr, p.len, cast(*u8, &_OUT), CAP); }
+    if (c < 0) { return cast(i64, c); }
+
+    // A URL the model predicts almost perfectly carries under a bit, and the
+    // coder trims its zero tail, so the code really can be empty. An empty
+    // fragment is not a link, so one character of zeros stands in — it decodes
+    // back to an empty payload, which is what the coder meant.
+    if (c == 0) {
+        if (unicode == 1) {
+            _OUT[0] = cast(u8, 0xE4); _OUT[1] = cast(u8, 0xB8); _OUT[2] = cast(u8, 0x80);
+            c = 3;
+        } else {
+            _OUT[0] = cast(u8, 65);
+            c = 1;
+        }
+    }
+    return cast(i64, c);
+}
+
+// Code of `len` bytes at wasm_inbuf() -> URL at wasm_outbuf().
+//
+// This runs on whatever was in the address bar, so every failure is an error
+// and none of them is a guess. A fragment that is not one of ours comes back
+// negative rather than as some plausible URL.
+fn wasm_decode(len as i64, unicode as i64) as i64 {
+    if (_ready == 0) {
+        let is i64 as rc1 = wasm_init();
+        if (rc1 != 0) { return rc1; }
+    }
+    let is i64 as n = cast(i64, len);
+    if (n <= 0)  { return cast(i64, errno.E_BADPAYLOAD); }
+    if (n > CAP) { return cast(i64, errno.E_SPACE); }
+
+    let is *cb.Bytes as p = _pay();
+    cb.bytes_reset(p);
+    if (cb.bytes_reserve(p, CAP) < 0) { return cast(i64, errno.E_OOM); }
+
+    let is i64 as pn with mut = 0;
+    if (unicode == 1) { pn = uni.uni_decode(cast(*u8, &_IN), n, p.ptr, CAP); }
+    else              { pn = b64.b64_decode(cast(*u8, &_IN), n, p.ptr, CAP); }
+    if (pn < 0) { return cast(i64, pn); }
+
+    let is i64 as d = codec.lnz_decode(p.ptr, pn, &_M, cast(*u8, &_OUT), us.MAX_URL);
+    if (d < 0) { return cast(i64, d); }
+    return cast(i64, d);
+}
+
+// Whether a decoded URL is safe to navigate to. A shortener with no database
+// will resolve a fragment to whatever it decodes to, so the scheme check is
+// the only thing standing between this page and being a javascript: and data:
+// delivery mechanism. It lives here rather than in the shim because a check
+// written in JavaScript is a check someone edits out of the page.
+fn wasm_scheme_ok(len as i64) as i64 {
+    let is i64 as n = cast(i64, len);
+    let is us.Split as sp = us.url_split(cast(*u8, &_OUT), n);
+    if (sp.ok != 0)          { return 0; }
+    if (sp.has_scheme != 1)  { return 0; }
+    if (sp.has_slashes != 1) { return 0; }
+
+    // http or https, case-insensitively, and nothing else.
+    let is i64 as L = sp.scheme_len;
+    if (L != 4 && L != 5) { return 0; }
+    let is [8]u8 as low;
+    let is i64 as i with mut = 0;
+    while (i < L) {
+        let is i64 as ch with mut = cast(i64, _OUT[sp.scheme_off + i]);
+        if (ch >= 65 && ch <= 90) { ch = ch + 32; }
+        low[i] = cast(u8, ch);
+        i = i + 1;
+    }
+    if (L == 4) {
+        if (low[0] == 104 && low[1] == 116 && low[2] == 116 && low[3] == 112) { return 1; }
+        return 0;
+    }
+    if (low[0] == 104 && low[1] == 116 && low[2] == 116 && low[3] == 112 && low[4] == 115) {
+        return 1;
+    }
+    return 0;
+}
+
+// WASI wants an entry point, and the wasm backend exports every function that
+// survives to codegen — there is no export attribute, so reachability from
+// main is the whole mechanism. Taking each address here is what keeps the ABI
+// above from being stripped as dead.
+//
+// It is never called. The page instantiates the module and calls the exports
+// directly: the functions above initialise themselves, and going through
+// _start would only route the module into proc_exit for nothing.
+fn main() as i32 {
+    let is i64 as keep with mut = 0;
+    keep = keep + cast(i64, fn_ptr(wasm_init));
+    keep = keep + cast(i64, fn_ptr(wasm_inbuf));
+    keep = keep + cast(i64, fn_ptr(wasm_outbuf));
+    keep = keep + cast(i64, fn_ptr(wasm_cap));
+    keep = keep + cast(i64, fn_ptr(wasm_max_url));
+    keep = keep + cast(i64, fn_ptr(wasm_model_id));
+    keep = keep + cast(i64, fn_ptr(wasm_encode));
+    keep = keep + cast(i64, fn_ptr(wasm_decode));
+    keep = keep + cast(i64, fn_ptr(wasm_scheme_ok));
+    if (keep == 0) { return 1; }
+    return 0;
+}

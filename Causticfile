@@ -61,6 +61,29 @@ target "train" {
     flags "-O1"
 }
 
+// The browser build. The wasm module, the model embedded in it, and a page
+// that opens from file:// with no server: see wasm/lnzip_wasm.cst.
+target "embed" {
+    src "tools/embed.cst"
+    out "build/embed"
+    flags "-O1"
+}
+
+target "bundle" {
+    src "tools/bundle.cst"
+    out "build/bundle"
+    flags "-O1"
+}
+
+script "web" {
+    "caustic-mk build embed"
+    "caustic-mk build bundle"
+    "./build/embed models/tiny-v1.lnzm wasm/model_embedded.cst"
+    "caustic --target=wasm32-wasi --path .caustic/deps -q wasm/lnzip_wasm.cst -o build/lnzip.wasm"
+    "cp web/index.html web/lnzip.js build/"
+    "./build/bundle web/index.html web/lnzip.js build/lnzip.wasm build/lnzip.html"
+}
+
 // ── Scripts ──────────────────────────────────────────────────────────
 
 // `build run` rather than a bare `caustic`: the dependency is resolved by the
@@ -77,6 +100,13 @@ script "test" {
 script "test-opt" {
     "caustic-mk build run"
     "./build/run ${OPT}"
+}
+
+// The wasm boundary, checked with node. Optional and deliberately outside
+// `run test`: a clone with no node still builds and still passes the suite.
+script "web-test" {
+    "caustic-mk run web"
+    "node web/test.js build/lnzip.wasm"
 }
 
 script "clean" {

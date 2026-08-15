@@ -33,7 +33,7 @@ sempre no argumento que importa: **sem estado**.
 | Coder de entropia | Aritmético binário, probabilidades **pré-treinadas e congeladas** (sem adaptação intra-URL) |
 | Modelo no payload | Zero bytes de tabela — o modelo é externo e mmap'd |
 | Corpus | Common Crawl (cdx) + Wikipedia external links + Tranco/Curlie + histórico local |
-| Servidor de redirect | Mesmo repo, entra na v1 |
+| Entrega | **Página estática, código no fragmento** (`lnzip.de#codigo`), decode em wasm no navegador |
 | Escopo v1 | Ponta-a-ponta com modelo **Tiny**; Standard/Max são re-treino, não código novo |
 
 ## Restrições do ambiente (medidas)
@@ -230,7 +230,7 @@ desvios, modo raw.
 por categoria de URL (curta/média/longa, com/sem ID aleatório, com/sem tracking).
 *Portão:* tabela publicada no README com números reais, incluindo os casos em que perdemos.
 
-**P8 — Servidor.** `server/http.cst`: request line + headers via `bufread.br_read_line`,
+**P8 — Página estática (substitui o servidor).** `server/http.cst`: request line + headers via `bufread.br_read_line`,
 accept loop single-thread com `tp.listener_wait`, `GET /<code>` → 302 `Location`,
 `GET /api/encode?url=…`, `GET /` com formulário. **Pré-requisito: resolver a tag do
 `caustic-net`** (ver Riscos) — nada mais depende disso.

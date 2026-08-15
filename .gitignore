@@ -8,5 +8,8 @@ build/
 # link, so the hashes have to be in the repository even when the bytes are not.
 models/*.lnzm
 
+# Generated from the model by tools/embed.cst, ~300 KB of escaped bytes.
+wasm/model_embedded.cst
+
 # Corpus lives on the 2TB volume, never here.
 corpus/

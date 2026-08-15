@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lnzip — the link is the URL</title>
+<meta name="description" content="A link whose code is the compressed URL. No database, no record: the part after the # never leaves your browser.">
+<style>
+/* ------------------------------------------------------------------
+   The unit of this product is the character, so the page is typeset in
+   a face where every character is the same width and can be counted.
+   Monospace is the display face here, not the code face.
+   Amber appears on exactly one thing: the payload.
+   ------------------------------------------------------------------ */
+:root {
+  --paper:  #EEF0F5;
+  --ink:    #141726;
+  --slate:  #5A6178;
+  --hair:   #C9CEDB;
+  --amber:  #C25A05;
+  --amber-bg: #FBEFE2;
+  --raised: #F7F8FB;
+
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:  #12141C;
+    --ink:    #E7EAF2;
+    --slate:  #8B93A8;
+    --hair:   #2A2F3E;
+    --amber:  #F0912F;
+    --amber-bg: #241a10;
+    --raised: #191C26;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 62rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+
+/* The measurement gutter: a ruler column that runs down the left of the
+   page. It exists because every number on it is a character count, which
+   is the only thing this product is about. */
+.grid {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0 1.75rem;
+}
+@media (max-width: 46rem) {
+  .grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .gutter { display: none; }
+}
+.gutter {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--slate);
+  text-align: right;
+  padding-top: 0.45rem;
+  border-right: 1px solid var(--hair);
+  padding-right: 1.75rem;
+  margin-right: -1.75rem;
+}
+.gutter b { display: block; font-weight: 600; color: var(--ink); font-size: 13px; }
+.gutter span { display: block; text-transform: uppercase; font-size: 9.5px; letter-spacing: 0.12em; }
+
+header { margin-bottom: 3.5rem; }
+.mark {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin: 0 0 1.75rem;
+}
+h1 {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: clamp(1.9rem, 5.2vw, 3.15rem);
+  letter-spacing: -0.045em;
+  line-height: 1.06;
+  margin: 0 0 1.1rem;
+  max-width: 20ch;
+}
+h1 em { font-style: normal; color: var(--amber); }
+.lede { margin: 0; max-width: 54ch; color: var(--slate); font-size: 1.02rem; }
+.lede strong { color: var(--ink); font-weight: 600; }
+
+/* ---- the form ---- */
+form { margin: 0; }
+label.field {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin-bottom: 0.55rem;
+}
+.row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+input[type=url], input[type=text] {
+  flex: 1 1 22rem;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--raised);
+  border: 1px solid var(--hair);
+  border-radius: 2px;
+  padding: 0.7rem 0.8rem;
+}
+input:focus-visible, button:focus-visible, .seg button:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+button {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--paper);
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  padding: 0.7rem 1.4rem;
+  cursor: pointer;
+}
+button:hover { background: var(--amber); border-color: var(--amber); }
+button.ghost {
+  background: transparent; color: var(--slate); border-color: var(--hair);
+}
+button.ghost:hover { color: var(--amber); border-color: var(--amber); background: transparent; }
+
+.seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 2px; overflow: hidden; margin-top: 0.9rem; }
+.seg button {
+  background: transparent; color: var(--slate); border: 0; border-radius: 0;
+  padding: 0.4rem 0.85rem; font-size: 0.72rem;
+}
+.seg button[aria-pressed=true] { background: var(--ink); color: var(--paper); }
+.seg button:hover { background: transparent; color: var(--amber); }
+.seg button[aria-pressed=true]:hover { background: var(--ink); color: var(--paper); }
+
+/* ---- the collapse: the input typeset small, the output typeset large ---- */
+.result { margin-top: 3rem; }
+.source {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--slate);
+  word-break: break-all;
+  margin: 0 0 1.5rem;
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--hair);
+}
+.base {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--slate);
+  word-break: break-all;
+  margin: 0 0 0.35rem;
+}
+.code {
+  font-family: var(--mono);
+  font-size: clamp(1.15rem, 3.4vw, 1.85rem);
+  letter-spacing: -0.02em;
+  line-height: 1.35;
+  color: var(--amber);
+  word-break: break-all;
+  margin: 0;
+}
+/* The ruler. A tick every five characters, so the length is legible as a
+   length rather than as a number someone has to trust. */
+.ruler {
+  height: 7px;
+  margin-top: 0.5rem;
+  background-image: repeating-linear-gradient(90deg, var(--hair) 0 1px, transparent 1px 5ch);
+  font-family: var(--mono);
+  font-size: clamp(1.15rem, 3.4vw, 1.85rem);
+  max-width: 100%;
+}
+.actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; flex-wrap: wrap; }
+
+.note {
+  font-size: 0.85rem; color: var(--slate);
+  border-left: 2px solid var(--amber); padding-left: 0.9rem; margin-top: 1.5rem;
+}
+.error {
+  font-family: var(--mono); font-size: 0.85rem;
+  color: var(--amber); background: var(--amber-bg);
+  padding: 0.7rem 0.9rem; border-radius: 2px; margin-top: 1.5rem;
+}
+[hidden] { display: none !important; }
+
+/* One orchestrated moment: the code arrives character by character, left to
+   right, because that is the order it was coded in. */
+.code span { animation: in 240ms ease-out both; }
+@keyframes in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .code span { animation: none; }
+}
+
+footer {
+  margin-top: 5rem; padding-top: 1.75rem; border-top: 1px solid var(--hair);
+  font-size: 0.85rem; color: var(--slate); max-width: 62ch;
+}
+footer p { margin: 0 0 0.9rem; }
+footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
+
+/* ---- resolve mode ---- */
+.resolving { min-height: 100vh; display: grid; place-content: center; padding: 2rem; }
+.resolving .mark { margin-bottom: 1.25rem; }
+.resolving .dest {
+  font-family: var(--mono); font-size: 0.95rem; word-break: break-all;
+  max-width: 60ch; margin: 0 0 1.5rem;
+}
+.bar { height: 2px; background: var(--hair); overflow: hidden; max-width: 60ch; }
+.bar i { display: block; height: 100%; width: 0; background: var(--amber); animation: fill 900ms linear forwards; }
+@keyframes fill { to { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .bar i { animation: none; width: 100%; } }
+</style>
+</head>
+<body>
+
+<!-- Resolve mode. Shown only when the address bar carries a fragment. -->
+<main id="resolve" class="resolving" hidden>
+  <p class="mark">lnzip</p>
+  <p id="resolveState" class="dest">Decoding…</p>
+  <div class="bar" id="resolveBar"><i></i></div>
+  <div id="resolveError" hidden></div>
+</main>
+
+<!-- Mint mode. -->
+<main id="mint" class="wrap" hidden>
+  <div class="grid">
+    <div class="gutter" aria-hidden="true"></div>
+    <header>
+      <p class="mark">lnzip</p>
+      <h1>The link <em>is</em> the URL, compressed.</h1>
+      <p class="lede">No database, no account, no record of where anyone went.
+        The part after the <strong>#</strong> is never sent to a server — this
+        page decompresses it in your browser and sends you on.</p>
+    </header>
+  </div>
+
+  <div class="grid">
+    <div class="gutter" id="gIn" aria-hidden="true"><b>—</b><span>bytes in</span></div>
+    <form id="form">
+      <label class="field" for="url">URL to compress</label>
+      <div class="row">
+        <input id="url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+               placeholder="https://wiki.archlinux.org/title/Arch_User_Repository">
+        <button type="submit">Compress</button>
+      </div>
+      <div class="seg" role="group" aria-label="Character set">
+        <button type="button" id="setAscii" aria-pressed="true">ASCII</button>
+        <button type="button" id="setUni" aria-pressed="false">Unicode</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="grid result" id="result" hidden>
+    <div class="gutter" id="gOut" aria-hidden="true"><b>—</b><span>characters</span></div>
+    <div>
+      <p class="source" id="source"></p>
+      <p class="base" id="base"></p>
+      <p class="code" id="code"></p>
+      <div class="ruler" id="ruler" aria-hidden="true"></div>
+      <div class="actions">
+        <button type="button" id="copy">Copy link</button>
+        <button type="button" class="ghost" id="open">Open it</button>
+      </div>
+      <p class="note" id="note" hidden></p>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="gutter" aria-hidden="true"></div>
+    <div id="err" class="error" hidden></div>
+  </div>
+
+  <div class="grid">
+    <div class="gutter" aria-hidden="true"></div>
+    <footer>
+      <p>A URL made mostly of a random identifier cannot be compressed by
+        anything — a YouTube video id is 66 bits of pure randomness, and no
+        amount of modelling removes randomness. lnzip wins on URLs built from
+        words and structure, and wins hugest on the long ones buried in
+        <code>utm_source</code> and tracking parameters.</p>
+      <p>What it gives up in exchange for storing nothing: a code is only as
+        short as the URL is predictable, and it can be longer than what a
+        shortener with a database would hand you. What it gives back is that
+        there is no database to leak, expire, or be subpoenaed.</p>
+      <p id="modelLine">Model —</p>
+    </footer>
+  </div>
+</main>
+
+<script src="lnzip.js"></script>
+<script>
+// Filled by tools/bundle.cst for the single-file build. Empty here, so the
+// served page fetches the module beside it instead.
+const WASM_B64 = "";
+
+(function () {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  async function wasmSource() {
+    if (WASM_B64) return b64ToBytes(WASM_B64);
+    const res = await fetch('lnzip.wasm');
+    if (!res.ok) throw new Error('could not load lnzip.wasm');
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  // The link this page mints, pointing at this page. An empty path is left
+  // empty rather than made "/" — the code is measured in characters, and that
+  // is one of them.
+  function selfBase() {
+    const path = location.pathname === '/' ? '' : location.pathname;
+    return location.origin + path;
+  }
+
+  // ---- resolve mode -------------------------------------------------
+  async function resolve(code) {
+    $('resolve').hidden = false;
+    const state = $('resolveState');
+    let lz;
+    try {
+      lz = await globalThis.lnzip.load(await wasmSource());
+    } catch (e) {
+      state.textContent = 'This page could not start: ' + e.message;
+      $('resolveBar').hidden = true;
+      return;
+    }
+
+    let out;
+    try {
+      out = lz.decode(code, { unicode: globalThis.lnzip.isUnicodeCode(code) });
+    } catch (e) {
+      state.textContent = 'That code does not decode: ' + e.message;
+      $('resolveBar').hidden = true;
+      return;
+    }
+
+    if (!out.safe) {
+      // Decoded fine, but names a scheme this page will not navigate to. With
+      // no database behind it, a fragment resolves to whatever it decodes to,
+      // so this is the line between a shortener and a javascript: delivery
+      // mechanism. The URL is shown as text; nothing here will open it.
+      state.innerHTML = '';
+      state.append('This code decodes to a ' + (out.url.split(':')[0] || 'unknown') +
+                   ': address, which this page will not open. Here it is as text:');
+      const pre = document.createElement('p');
+      pre.className = 'dest';
+      pre.style.color = 'var(--amber)';
+      pre.textContent = out.url;
+      state.after(pre);
+      $('resolveBar').hidden = true;
+      return;
+    }
+
+    state.textContent = out.url;
+    location.replace(out.url);
+  }
+
+  // ---- mint mode ----------------------------------------------------
+  async function mint() {
+    $('mint').hidden = false;
+    let lz = null;
+    let unicode = false;
+    let link = '';
+
+    const err = $('err');
+    const setError = (msg) => {
+      err.hidden = !msg;
+      err.textContent = msg || '';
+      if (msg) $('result').hidden = true;
+    };
+
+    try {
+      lz = await globalThis.lnzip.load(await wasmSource());
+      $('modelLine').textContent = 'Model ' + lz.modelId + ' · maximum URL ' + lz.maxUrl + ' bytes';
+    } catch (e) {
+      setError('This page could not start: ' + e.message);
+      return;
+    }
+
+    const setMode = (uni) => {
+      unicode = uni;
+      $('setAscii').setAttribute('aria-pressed', String(!uni));
+      $('setUni').setAttribute('aria-pressed', String(uni));
+      if (!$('result').hidden) run();
+    };
+    $('setAscii').addEventListener('click', () => setMode(false));
+    $('setUni').addEventListener('click', () => setMode(true));
+
+    function paint(url, code) {
+      const base = selfBase();
+      link = base + '#' + code;
+
+      $('source').textContent = url;
+      $('gIn').innerHTML = '<b>' + new TextEncoder().encode(url).length + '</b><span>bytes in</span>';
+
+      $('base').textContent = base + '#';
+
+      const el = $('code');
+      el.textContent = '';
+      const chars = Array.from(code);
+      chars.forEach((ch, i) => {
+        const s = document.createElement('span');
+        s.textContent = ch;
+        s.style.animationDelay = Math.min(i * 18, 700) + 'ms';
+        el.append(s);
+      });
+
+      $('gOut').innerHTML = '<b>' + chars.length + '</b><span>characters</span>';
+      $('ruler').style.width = 'min(' + chars.length + 'ch, 100%)';
+
+      const note = $('note');
+      const inBytes = new TextEncoder().encode(url).length;
+      if (chars.length >= inBytes) {
+        note.hidden = false;
+        note.textContent = 'This one did not get shorter. Its content is close to ' +
+          'random as far as the model is concerned, and randomness is the one thing ' +
+          'compression cannot remove.';
+      } else {
+        note.hidden = true;
+      }
+      $('result').hidden = false;
+    }
+
+    function run() {
+      const url = $('url').value.trim();
+      if (!url) { setError(''); $('result').hidden = true; return; }
+      try {
+        paint(url, lz.encode(url, { unicode: unicode }));
+        setError('');
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+
+    $('form').addEventListener('submit', (e) => { e.preventDefault(); run(); });
+
+    $('copy').addEventListener('click', async () => {
+      const btn = $('copy');
+      try {
+        await navigator.clipboard.writeText(link);
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = 'Copy link'; }, 1400);
+      } catch (e) {
+        btn.textContent = 'Copy failed';
+        setTimeout(() => { btn.textContent = 'Copy link'; }, 1400);
+      }
+    });
+
+    $('open').addEventListener('click', () => { if (link) location.href = link; });
+  }
+
+  // A fragment change does not reload a page. Without this, pasting a code
+  // into the address bar while already on this page would silently do nothing
+  // — which is exactly how most people would first try to use it.
+  window.addEventListener('hashchange', () => location.reload());
+
+  const frag = location.hash.replace(/^#/, '');
+  if (frag) resolve(decodeURIComponent(frag));
+  else mint();
+})();
+</script>
+</body>
+</html>
