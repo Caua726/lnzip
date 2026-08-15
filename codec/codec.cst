@@ -46,6 +46,18 @@ let is i64 as MODE_STRUCT with imut = 1;
 
 let is i64 as ID_BITS with imut = 3;
 
+// Three bits name the first seven models; the eighth value is an escape into
+// twelve more, for ids 7..4102.
+//
+// The escape is not speculative tidiness. A published model id is frozen
+// forever — links in the wild point at it — so the id space can only ever be
+// spent, never reclaimed. With tiers multiplied by retrains over a decade,
+// eight is not a supply, it is a countdown. Adding the escape costs nothing
+// today, since a payload naming id 0 through 6 is coded exactly as before, and
+// it cannot be added at all once the first link exists.
+let is i64 as ID_ESCAPE   with imut = 7;
+let is i64 as ID_ESC_BITS with imut = 12;
+
 // Probabilities for the model id. Hardcoded because they must be readable
 // before a model is chosen, and skewed toward the low ids because those are
 // published first and named most. Naming a high id costs about three bits,
@@ -69,6 +81,21 @@ fn _id_probs() as *u16 {
     _idp[7] = cast(u16, 1024);
     _idp_ready = 1;
     return _idp;
+}
+
+fn _enc_model_id(e as *rc.Enc, id as i64) as void {
+    if (id < ID_ESCAPE) {
+        rc.enc_tree(e, _id_probs(), 0, ID_BITS, id);
+        return;
+    }
+    rc.enc_tree(e, _id_probs(), 0, ID_BITS, ID_ESCAPE);
+    rc.enc_direct(e, id - ID_ESCAPE, ID_ESC_BITS);
+}
+
+fn _dec_model_id(d as *rc.Dec) as i64 {
+    let is i64 as v = rc.dec_tree(d, _id_probs(), 0, ID_BITS);
+    if (v < ID_ESCAPE) { return v; }
+    return ID_ESCAPE + rc.dec_direct(d, ID_ESC_BITS);
 }
 
 // Scratch for the losing candidate. The encoder builds both modes and keeps
@@ -598,7 +625,7 @@ fn _encode_struct(sp as *us.Split, m as *model.Model, out as *bytes.Bytes) as i6
     let is rc.Enc as e with mut;
     rc.enc_init(&e, out);
 
-    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
+    _enc_model_id(&e, m.model_id);
     rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_STRUCT);
 
     // The scheme, asked as two questions rather than coded as a string. Almost
@@ -767,7 +794,7 @@ fn _encode_raw(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) a
     let is rc.Enc as e with mut;
     rc.enc_init(&e, out);
 
-    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
+    _enc_model_id(&e, m.model_id);
     rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_RAW);
     _enc_len(&e, m.probs, ctx.CTX_LEN, len);
 
@@ -956,7 +983,7 @@ fn lnz_decode(src as *u8, slen as i64, m as *model.Model, out as *u8, max as i64
     let is rc.Dec as d with mut;
     rc.dec_init(&d, src, slen);
 
-    if (rc.dec_tree(&d, _id_probs(), 0, ID_BITS) != m.model_id) { return errno.E_NOMODEL; }
+    if (_dec_model_id(&d) != m.model_id) { return errno.E_NOMODEL; }
 
     let is i64 as mode = rc.dec_bit(&d, cast(i64, m.probs[ctx.CTX_MODE]));
     let is i64 as n with mut = 0;

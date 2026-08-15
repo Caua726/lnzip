@@ -173,6 +173,36 @@ fn main() as i32 {
     io.write_str(io.STDOUT, " trained\n");
     if (trained >= untrained / 2) { return 39; }   // memorising 14 strings should be dramatic
 
+    // ── 2b. an id past the direct range still round-trips ─────────
+    //
+    // Seven ids are named in three bits and the rest through an escape. Ids are
+    // frozen at publication and never reused, so the space is spent and never
+    // reclaimed — the escape is what stops eight tiers-times-retrains from
+    // being a wall it is too late to move.
+    if (model.model_write(MODEL_PATH, 4102, model.TIER_TINY, probs,
+                          cast(*u8, &dofs), cast(*i64, &dofs)) < 0) { return 60; }
+    let is model.Model as hi with mut;
+    if (model.model_open(&hi, MODEL_PATH) != 0) { return 61; }
+    if (hi.model_id != 4102)                    { return 62; }
+    if (roundtrip(&hi, sample(1), sample_len(1), &pay) != 0) { return 63; }
+
+    // And a payload from a high id is still refused by a different model,
+    // rather than decoding against the wrong statistics.
+    cb.bytes_reset(&pay);
+    if (codec.lnz_encode(sample(1), sample_len(1), &hi, &pay) < 0) { return 64; }
+    let is [9000]u8 as hout;
+    if (codec.lnz_decode(pay.ptr, pay.len, &bi, cast(*u8, &hout), 9000) != errno.E_NOMODEL) {
+        return 65;
+    }
+    // Past the ceiling is refused at write time.
+    if (model.model_write(MODEL_PATH, 4103, model.TIER_TINY, probs,
+                          cast(*u8, &dofs), cast(*i64, &dofs)) != errno.E_BADMODEL) { return 66; }
+    model.model_free(&hi);
+
+    // Rewrite the id-3 model the rest of this file expects.
+    if (model.model_write(MODEL_PATH, 3, model.TIER_TINY, probs,
+                          cast(*u8, &dofs), cast(*i64, &dofs)) < 0) { return 67; }
+
     // ── 3. a payload minted for another model is refused ──────────
     //
     // Not a nicety. Model ids are frozen forever precisely so an old link

@@ -189,6 +189,28 @@ button.ghost:hover { color: var(--amber); border-color: var(--amber); background
   max-width: 100%;
 }
 .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; flex-wrap: wrap; }
+.controls { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: flex-end; margin-top: 1.1rem; }
+.ctl { display: flex; flex-direction: column; gap: 0.35rem; }
+.ctl.grow { flex: 1 1 16rem; min-width: 0; }
+.ctl-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--slate);
+}
+.ctl .seg { margin-top: 0; }
+.ctl input { flex: 1 1 auto; padding: 0.42rem 0.6rem; font-size: 0.82rem; }
+
+/* The QR is the one place the ratio has a physical consequence: fewer
+   characters is a lower version, which is a code that scans from further away. */
+.qr-wrap { margin-top: 2rem; }
+.qr { width: min(15rem, 60vw); color: var(--ink); background: var(--raised);
+      padding: 0.75rem; border: 1px solid var(--hair); border-radius: 2px; }
+.qr svg { display: block; width: 100%; height: auto; }
+.qr-cap { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+          color: var(--slate); margin: 0.5rem 0 0; }
+@media (min-width: 52rem) {
+  .result-body { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2.5rem; align-items: start; }
+  .qr-wrap { margin-top: 0; }
+}
 .section { margin-top: 4rem; padding-top: 2.5rem; border-top: 1px solid var(--hair); }
 .hint { font-size: 0.85rem; color: var(--slate); margin: 0.9rem 0 0; max-width: 54ch; }
 .dest {
@@ -272,16 +294,45 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
                placeholder="https://wiki.archlinux.org/title/Arch_User_Repository">
         <button type="submit">Compress</button>
       </div>
-      <div class="seg" role="group" aria-label="Character set">
-        <button type="button" id="setAscii" aria-pressed="true">ASCII</button>
-        <button type="button" id="setUni" aria-pressed="false">Unicode</button>
+      <div class="controls">
+        <div class="ctl">
+          <span class="ctl-label">Characters</span>
+          <div class="seg" role="group" aria-label="Character set">
+            <button type="button" id="setAscii" aria-pressed="true">ASCII</button>
+            <button type="button" id="setUni" aria-pressed="false">Unicode</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <span class="ctl-label">Model</span>
+          <div class="seg" role="group" aria-label="Model">
+            <button type="button" id="setTiny" aria-pressed="true">Tiny</button>
+            <button type="button" id="setStd" aria-pressed="false">Standard</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <span class="ctl-label">QR correction</span>
+          <div class="seg" role="group" aria-label="QR error correction">
+            <button type="button" id="setEcL" aria-pressed="false">L</button>
+            <button type="button" id="setEcM" aria-pressed="true">M</button>
+            <button type="button" id="setEcQ" aria-pressed="false">Q</button>
+            <button type="button" id="setEcH" aria-pressed="false">H</button>
+          </div>
+        </div>
+        <div class="ctl grow">
+          <label class="ctl-label" for="base">Link base</label>
+          <input id="base-input" type="text" spellcheck="false" autocomplete="off">
+        </div>
       </div>
+      <p class="hint" id="modelNote">Tiny is built into this page and answers instantly.
+        Standard compresses about a fifth better and is fetched once, then cached —
+        but a link made with it can only be opened by someone who fetches it too.</p>
     </form>
   </div>
 
   <div class="grid result" id="result" hidden>
     <div class="gutter" id="gOut" aria-hidden="true"><b>—</b><span>characters</span></div>
-    <div>
+    <div class="result-body">
+     <div>
       <p class="source" id="source"></p>
       <p class="base" id="base"></p>
       <p class="code" id="code"></p>
@@ -291,6 +342,11 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
         <button type="button" class="ghost" id="open">Open it</button>
       </div>
       <p class="note" id="note" hidden></p>
+     </div>
+      <div class="qr-wrap" id="qrWrap" hidden>
+        <div class="qr" id="qr"></div>
+        <p class="qr-cap" id="qrCap"></p>
+      </div>
     </div>
   </div>
 
@@ -342,6 +398,7 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
 </main>
 
 <script src="lnzip.js"></script>
+<script src="qr.js"></script>
 <script>
 // Filled by tools/bundle.cst for the single-file build. Empty here, so the
 // served page fetches the module beside it instead.
@@ -370,6 +427,7 @@ const WASM_B64 = "";
   // empty rather than made "/" — the code is measured in characters, and that
   // is one of them.
   function selfBase() {
+    if (location.protocol === 'file:') return location.href.split('#')[0];
     const path = location.pathname === '/' ? '' : location.pathname;
     return location.origin + path;
   }
@@ -423,6 +481,9 @@ const WASM_B64 = "";
     let lz = null;
     let unicode = false;
     let link = '';
+    let slot = 0;                 // 0 = the model in this page, 1 = one fetched
+    let ecLevel = 'M';
+    let base = selfBase();
 
     const err = $('err');
     const setError = (msg) => {
@@ -439,17 +500,64 @@ const WASM_B64 = "";
       return;
     }
 
+    const press = (id, on) => $(id).setAttribute('aria-pressed', String(on));
+
     const setMode = (uni) => {
       unicode = uni;
-      $('setAscii').setAttribute('aria-pressed', String(!uni));
-      $('setUni').setAttribute('aria-pressed', String(uni));
+      press('setAscii', !uni); press('setUni', uni);
       if (!$('result').hidden) run();
     };
     $('setAscii').addEventListener('click', () => setMode(false));
     $('setUni').addEventListener('click', () => setMode(true));
 
+    // L through H: more correction survives more damage — H reads with about
+    // a third of the code obscured — and pays for it in a larger version.
+    const setEc = (lv) => {
+      ecLevel = lv;
+      for (const x of ['L', 'M', 'Q', 'H']) press('setEc' + x, lv === x);
+      if (!$('result').hidden) run();
+    };
+    for (const x of ['L', 'M', 'Q', 'H']) {
+      $('setEc' + x).addEventListener('click', () => setEc(x));
+    }
+
+    $('base-input').value = base;
+    $('base-input').addEventListener('input', () => {
+      base = $('base-input').value.trim() || selfBase();
+      if (!$('result').hidden) run();
+    });
+
+    // The bigger model is fetched rather than shipped, because everyone who
+    // opens a link made with it has to fetch it too. It is cached by the
+    // browser and never changes — a published model id is frozen — so the cost
+    // is paid once.
+    let stdLoaded = false;
+    const note = $('modelNote');
+    const setModel = async (wantStd) => {
+      if (!wantStd) { slot = 0; press('setTiny', true); press('setStd', false); run(); return; }
+      if (!stdLoaded) {
+        note.textContent = 'Fetching the standard model…';
+        try {
+          const res = await fetch('standard.lnzm');
+          if (!res.ok) throw new Error('it is not published beside this page');
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          lz.loadModel(bytes);
+          stdLoaded = true;
+          note.textContent = 'Standard model loaded (' +
+            Math.round(bytes.length / 1024) + ' KB). Links made with it need it to open.';
+        } catch (e) {
+          note.textContent = 'The standard model could not be loaded: ' + e.message +
+            '. Staying on the model built into this page.';
+          press('setTiny', true); press('setStd', false);
+          return;
+        }
+      }
+      slot = 1; press('setTiny', false); press('setStd', true); run();
+    };
+    $('setTiny').addEventListener('click', () => setModel(false));
+    $('setStd').addEventListener('click', () => setModel(true));
+
     function paint(url, code) {
-      const base = selfBase();
       link = base + '#' + code;
 
       $('source').textContent = url;
@@ -470,6 +578,18 @@ const WASM_B64 = "";
       $('gOut').innerHTML = '<b>' + chars.length + '</b><span>characters</span>';
       $('ruler').style.width = 'min(' + chars.length + 'ch, 100%)';
 
+      // Fewer characters is a lower QR version, which is a code that scans
+      // from further away. It is the one place the ratio is physical.
+      const q = globalThis.qr.encode(link, { level: ecLevel });
+      if (q) {
+        $('qr').innerHTML = globalThis.qr.svg(q, { quiet: 3 });
+        $('qrCap').textContent = 'version ' + q.version + ' · ' + q.size + '×' + q.size +
+                                 ' modules · correction ' + q.level;
+        $('qrWrap').hidden = false;
+      } else {
+        $('qrWrap').hidden = true;
+      }
+
       const note = $('note');
       const inBytes = new TextEncoder().encode(url).length;
       if (chars.length >= inBytes) {
@@ -487,7 +607,7 @@ const WASM_B64 = "";
       const url = $('url').value.trim();
       if (!url) { setError(''); $('result').hidden = true; return; }
       try {
-        paint(url, lz.encode(url, { unicode: unicode }));
+        paint(url, lz.encode(url, { unicode: unicode, slot: slot }));
         setError('');
       } catch (e) {
         setError(e.message);

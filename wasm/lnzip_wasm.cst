@@ -34,6 +34,7 @@ use "../fmt/uni.cst"     as uni;
 use "../url/split.cst"   as us;
 use "./model_embedded.cst" as embedded;
 use "caustic-compact/core/bytes.cst" as cb;
+use "std/mem.cst" only bins, core as mem;
 
 let is i64 as CAP with imut = 65536;
 
@@ -42,6 +43,21 @@ let is [65536]u8 as _OUT;
 
 let is model.Model as _M with mut;
 let is i64 as _ready with mut = 0;
+
+// A second slot, for a model handed in at run time. The embedded one is small
+// enough to ship inside the page and resolves instantly; a larger tier is
+// fetched, and since a published model never changes it can be cached
+// immutably and forever.
+//
+// Both are kept because a link names its model: a code minted against the
+// standard tier cannot be read by the tiny one, and someone arriving with such
+// a link must be able to fetch what it names rather than be told no.
+let is model.Model as _M2 with mut;
+let is i64 as _ready2 with mut = 0;
+
+let is i64 as MBUF_CAP with imut = 33554432;    // 32 MB, past any tier
+let is *u8 as _MBUF with mut;
+let is i64 as _mbuf_ready with mut = 0;
 
 let is cb.Bytes as _PAY with mut;
 let is i64 as _pay_ready with mut = 0;
@@ -63,6 +79,40 @@ fn wasm_init() as i64 {
     return 0;
 }
 
+// Where to write a model before calling wasm_load_model. The bytes are not
+// copied — the model is read in place — so this buffer stays live for as long
+// as the model does.
+fn wasm_model_buf() as i64 {
+    if (_mbuf_ready == 0) {
+        _MBUF = mem.core.mmap_anon(MBUF_CAP);
+        if (cast(i64, _MBUF) <= 0) { return 0; }
+        _mbuf_ready = 1;
+    }
+    return cast(i64, _MBUF);
+}
+
+fn wasm_model_cap() as i64 { return MBUF_CAP; }
+
+// Adopt whatever is in the buffer as the second model. Returns its id, or a
+// negative error — the same structural checks model_open runs, because these
+// bytes arrived over a network.
+fn wasm_load_model(len as i64) as i64 {
+    if (_mbuf_ready == 0) { return errno.E_BADMODEL; }
+    if (len <= 0)         { return errno.E_BADMODEL; }
+    if (len > MBUF_CAP)   { return errno.E_SPACE; }
+    let is i64 as rc0 = model.model_attach(&_M2, _MBUF, len);
+    if (rc0 != 0) { _ready2 = 0; return rc0; }
+    _ready2 = 1;
+    return _M2.model_id;
+}
+
+// The O(file) content check, on request. A model that arrived over a network
+// and does not hash to what it should is refused rather than used.
+fn wasm_verify_model() as i64 {
+    if (_ready2 == 0) { return errno.E_BADMODEL; }
+    return model.model_verify(&_M2);
+}
+
 fn wasm_model_id() as i64 {
     if (_ready == 0) { return cast(i64, 0 - 1); }
     return cast(i64, _M.model_id);
@@ -79,10 +129,15 @@ fn _pay() as *cb.Bytes {
 // URL of `len` bytes at wasm_inbuf() -> code at wasm_outbuf().
 // `unicode` selects the CJK alphabet over Base64URL. Returns the number of
 // bytes written (UTF-8 bytes, for the Unicode alphabet), or a negative errno.
-fn wasm_encode(len as i64, unicode as i64) as i64 {
+fn wasm_encode(len as i64, unicode as i64, slot as i64) as i64 {
     if (_ready == 0) {
         let is i64 as rc1 = wasm_init();
         if (rc1 != 0) { return rc1; }
+    }
+    let is *model.Model as mm with mut = &_M;
+    if (slot == 1) {
+        if (_ready2 == 0) { return errno.E_NOMODEL; }
+        mm = &_M2;
     }
     let is i64 as n = cast(i64, len);
     if (n <= 0)         { return cast(i64, errno.E_BADURL); }
@@ -90,7 +145,7 @@ fn wasm_encode(len as i64, unicode as i64) as i64 {
 
     let is *cb.Bytes as p = _pay();
     cb.bytes_reset(p);
-    let is i64 as w = codec.lnz_encode(cast(*u8, &_IN), n, &_M, p);
+    let is i64 as w = codec.lnz_encode(cast(*u8, &_IN), n, mm, p);
     if (w < 0) { return cast(i64, w); }
 
     let is i64 as c with mut = 0;
@@ -137,7 +192,15 @@ fn wasm_decode(len as i64, unicode as i64) as i64 {
     else              { pn = b64.b64_decode(cast(*u8, &_IN), n, p.ptr, CAP); }
     if (pn < 0) { return cast(i64, pn); }
 
-    let is i64 as d = codec.lnz_decode(p.ptr, pn, &_M, cast(*u8, &_OUT), us.MAX_URL);
+    // A payload names its model. Try the embedded one, then whatever was
+    // loaded: E_NOMODEL is exactly the answer "this code is not mine", so
+    // asking each in turn is both correct and cheap.
+    let is i64 as d with mut = codec.lnz_decode(p.ptr, pn, &_M, cast(*u8, &_OUT), us.MAX_URL);
+    if (d == errno.E_NOMODEL) {
+        if (_ready2 == 1) {
+            d = codec.lnz_decode(p.ptr, pn, &_M2, cast(*u8, &_OUT), us.MAX_URL);
+        }
+    }
     if (d < 0) { return cast(i64, d); }
     return cast(i64, d);
 }
@@ -191,6 +254,10 @@ fn main() as i32 {
     keep = keep + cast(i64, fn_ptr(wasm_cap));
     keep = keep + cast(i64, fn_ptr(wasm_max_url));
     keep = keep + cast(i64, fn_ptr(wasm_model_id));
+    keep = keep + cast(i64, fn_ptr(wasm_model_buf));
+    keep = keep + cast(i64, fn_ptr(wasm_model_cap));
+    keep = keep + cast(i64, fn_ptr(wasm_load_model));
+    keep = keep + cast(i64, fn_ptr(wasm_verify_model));
     keep = keep + cast(i64, fn_ptr(wasm_encode));
     keep = keep + cast(i64, fn_ptr(wasm_decode));
     keep = keep + cast(i64, fn_ptr(wasm_scheme_ok));

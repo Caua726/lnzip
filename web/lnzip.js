@@ -121,12 +121,31 @@ async function load(source) {
     modelId: call(ex.wasm_model_id),
     maxUrl: call(ex.wasm_max_url),
 
-    encode(url, { unicode = false } = {}) {
+    // Adopt a model fetched at run time as the second slot, and return its
+    // id. Nothing is copied: the bytes go straight into the module's memory
+    // and are read in place from there.
+    loadModel(bytes) {
+      const at = call(ex.wasm_model_buf);
+      if (!at) throw new Error('the module could not make room for a model');
+      const room = call(ex.wasm_model_cap);
+      if (bytes.length > room) throw new Error('that model is larger than the module allows');
+      new Uint8Array(ex.memory.buffer, at, room).set(bytes);
+      const id = call(ex.wasm_load_model, bytes.length);
+      if (id < 0) throw new Error(describe(id));
+      const bad = call(ex.wasm_verify_model);
+      if (bad !== 0) throw new Error('that model failed its own integrity check');
+      return id;
+    },
+
+    // `slot` is 0 for the model built into the page and 1 for one loaded with
+    // loadModel. A code names its model, so this choice follows the link
+    // forever.
+    encode(url, { unicode = false, slot = 0 } = {}) {
       const bytes = enc.encode(url);
       if (bytes.length === 0) throw new Error('nothing to encode');
       if (bytes.length > cap) throw new Error('that URL is too long');
       inBuf().set(bytes);
-      const n = call(ex.wasm_encode, bytes.length, unicode ? 1 : 0);
+      const n = call(ex.wasm_encode, bytes.length, unicode ? 1 : 0, slot);
       if (n < 0) throw new Error(describe(n));
       return dec.decode(outBuf().slice(0, n));
     },

@@ -2,19 +2,18 @@
 // tools/bundle.cst — one file that is the whole product.
 //
 //   caustic-mk build bundle
-//   ./build/bundle web/index.html web/lnzip.js build/lnzip.wasm build/lnzip.html
+//   ./build/bundle web/index.html build/lnzip.wasm build/lnzip.html
 //
-// Inlines the shim and the module into the page, so the result opens from
+// Inlines every script the page names, and the module, into the page, so the result opens from
 // file:// with no server and no network. That is not only a convenience for
 // development: a page that needs nothing from anywhere is a page that can be
 // audited, saved, and served from a bucket, and the claim it makes — that the
 // fragment never leaves the browser — becomes something a reader can check
 // rather than take on trust.
 //
-// Two substitutions, both anchored on exact strings that exist in the source
-// page and are checked for. A silent no-op here would produce a page that
-// looks right and fetches from the network, which is the one failure this
-// tool must not have.
+// Every substitution is anchored on an exact string, and every anchor is
+// checked for. A silent no-op here would produce a page that looks right and
+// fetches from the network, which is the one failure this tool must not have.
 // =======================================================
 
 use "caustic-compact/core/bytes.cst" as cb;
@@ -108,58 +107,104 @@ fn b64_std(b as *cb.Bytes, src as *u8, n as i64) as void {
     }
 }
 
+// The directory a path sits in, including the trailing slash. Scripts are
+// resolved beside the page, which is where a browser would look for them.
+fn dirname(path as *u8, out as *u8) as i64 {
+    let is i64 as n = slen(path);
+    let is i64 as cut with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (cast(i64, path[i]) == 47) { cut = i + 1; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < cut) { out[i] = path[i]; i = i + 1; }
+    out[cut] = cast(u8, 0);
+    return cut;
+}
+
 fn main(argc as i64, argv as *u8) as i32 {
     env.init(argc, argv);
-    if (env.argc() < 5) {
-        io.write_str(io.STDERR, "usage: bundle <index.html> <lnzip.js> <lnzip.wasm> <out.html>\n");
+    if (env.argc() < 4) {
+        io.write_str(io.STDERR, "usage: bundle <index.html> <lnzip.wasm> <out.html>\n");
         return 2;
     }
 
     let is [1]i64 as hn;  let is *u8 as html = slurp(env.argv(1), cast(*i64, &hn));
-    let is [1]i64 as jn;  let is *u8 as js   = slurp(env.argv(2), cast(*i64, &jn));
-    let is [1]i64 as wn;  let is *u8 as wasm = slurp(env.argv(3), cast(*i64, &wn));
+    let is [1]i64 as wn;  let is *u8 as wasm = slurp(env.argv(2), cast(*i64, &wn));
     if (cast(i64, html) == 0) { io.write_str(io.STDERR, "cannot read page\n");   return 3; }
-    if (cast(i64, js) == 0)   { io.write_str(io.STDERR, "cannot read shim\n");   return 3; }
     if (cast(i64, wasm) == 0) { io.write_str(io.STDERR, "cannot read module\n"); return 3; }
 
-    let is *u8 as TAG = "<script src=\"lnzip.js\"></script>";
-    let is *u8 as SLOT = "const WASM_B64 = \"\";";
+    let is [1024]u8 as dir;
+    dirname(env.argv(1), cast(*u8, &dir));
 
-    let is i64 as at_tag  = find(html, hn[0], TAG);
+    let is *u8 as SLOT = "const WASM_B64 = \"\";";
     let is i64 as at_slot = find(html, hn[0], SLOT);
-    if (at_tag < 0) {
-        io.write_str(io.STDERR, "page does not contain the script tag to inline\n");
-        return 4;
-    }
     if (at_slot < 0) {
         io.write_str(io.STDERR, "page does not contain the WASM_B64 slot\n");
         return 4;
     }
-    if (at_slot < at_tag) {
-        io.write_str(io.STDERR, "the WASM_B64 slot must come after the script tag\n");
+
+    let is cb.Bytes as out with mut = cb.bytes_new(hn[0] + (wn[0] / 3) * 4 + 262144);
+
+    // Inline every <script src="..."></script> by reading the file beside the
+    // page. A tag left behind would leave the bundle fetching from the network,
+    // which is the one failure this tool must not have — so every tag is found
+    // and each one is checked to have been readable.
+    let is *u8 as OPEN  = "<script src=\"";
+    let is *u8 as CLOSE = "\"></script>";
+    let is i64 as scripts with mut = 0;
+    let is i64 as pos with mut = 0;
+    while (1 == 1) {
+        let is i64 as rel = find(cast(*u8, cast(i64, html) + pos), hn[0] - pos, OPEN);
+        if (rel < 0) { break; }
+        let is i64 as a = rel + pos;
+        let is i64 as nameat = a + slen(OPEN);
+        let is i64 as relb = find(cast(*u8, cast(i64, html) + nameat), hn[0] - nameat, CLOSE);
+        if (relb < 0) { break; }
+        let is i64 as b = relb + nameat;
+
+        let is [1024]u8 as path;
+        let is i64 as d = dirname(env.argv(1), cast(*u8, &path));
+        let is i64 as k with mut = 0;
+        while (nameat + k < b) { path[d + k] = html[nameat + k]; k = k + 1; }
+        path[d + k] = cast(u8, 0);
+
+        let is [1]i64 as jn;
+        let is *u8 as js = slurp(cast(*u8, &path), cast(*i64, &jn));
+        if (cast(i64, js) == 0) {
+            io.write_str(io.STDERR, "cannot read script: ");
+            io.write_str(io.STDERR, cast(*u8, &path));
+            io.write_str(io.STDERR, "\n");
+            return 4;
+        }
+
+        append(&out, html, pos, a);
+        append_str(&out, "<script>\n");
+        append(&out, js, 0, jn[0]);
+        append_str(&out, "\n</script>");
+        pos = b + slen(CLOSE);
+        scripts = scripts + 1;
+    }
+    if (scripts == 0) {
+        io.write_str(io.STDERR, "page contains no script tag to inline\n");
         return 4;
     }
 
-    let is cb.Bytes as out with mut = cb.bytes_new(hn[0] + jn[0] + (wn[0] / 3) * 4 + 8192);
-
-    append(&out, html, 0, at_tag);
-    append_str(&out, "<script>\n");
-    append(&out, js, 0, jn[0]);
-    append_str(&out, "\n</script>");
-    append(&out, html, at_tag + slen(TAG), at_slot);
+    append(&out, html, pos, at_slot);
     append_str(&out, "const WASM_B64 = \"");
     b64_std(&out, wasm, wn[0]);
     append_str(&out, "\";");
     append(&out, html, at_slot + slen(SLOT), hn[0]);
 
-    let is i64 as w = io.write_file_atomic(env.argv(4), out.ptr, out.len);
+    let is i64 as w = io.write_file_atomic(env.argv(3), out.ptr, out.len);
     if (w < 0) { io.write_str(io.STDERR, "write failed\n"); return 5; }
 
     io.write_str(io.STDOUT, "bundle: page "); io.write_int(io.STDOUT, hn[0]);
-    io.write_str(io.STDOUT, " + shim ");      io.write_int(io.STDOUT, jn[0]);
-    io.write_str(io.STDOUT, " + wasm ");      io.write_int(io.STDOUT, wn[0]);
+    io.write_str(io.STDOUT, " + ");           io.write_int(io.STDOUT, scripts);
+    io.write_str(io.STDOUT, " scripts + wasm "); io.write_int(io.STDOUT, wn[0]);
     io.write_str(io.STDOUT, " -> ");          io.write_int(io.STDOUT, out.len);
     io.write_str(io.STDOUT, " bytes, self-contained -> ");
-    io.write_str(io.STDOUT, env.argv(4));     io.write_str(io.STDOUT, "\n");
+    io.write_str(io.STDOUT, env.argv(3));     io.write_str(io.STDOUT, "\n");
     return 0;
 }

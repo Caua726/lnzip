@@ -80,8 +80,30 @@ fn dict_size(tier as i64, which as i64) as i64 {
     return 262144;
 }
 
-let is i64 as TAB_SLOTS with imut = 1048576;    // 2^20
-let is i64 as TAB_ARENA with imut = 33554432;   // 32 MB of token bytes
+// Counting table sizes, per dictionary. They differ by an order of magnitude
+// because the dictionaries do: a corpus has a few million distinct host labels
+// and a few hundred million distinct path pieces, and sizing them all for the
+// largest would need memory this machine does not have.
+//
+// When a table fills, insertion stops and the report says so. That matters
+// more than it sounds: the tail is exactly where the uncommon words live, and
+// a table that silently dropped them would produce a model that looks fine and
+// spells out every unusual word in the language.
+fn tab_slots(which as i64) as i64 {
+    if (which == ctx.DICT_HOST) { return 2097152; }     // 2^21
+    if (which == ctx.DICT_PATH) { return 4194304; }     // 2^22
+    if (which == ctx.DICT_KEY)  { return 1048576; }     // 2^20
+    if (which == ctx.DICT_VAL)  { return 4194304; }     // 2^22
+    return 8388608;                                      // 2^23 for the words
+}
+
+fn tab_arena(which as i64) as i64 {
+    if (which == ctx.DICT_HOST) { return 67108864; }    // 64 MB
+    if (which == ctx.DICT_PATH) { return 268435456; }   // 256 MB
+    if (which == ctx.DICT_KEY)  { return 33554432; }    // 32 MB
+    if (which == ctx.DICT_VAL)  { return 268435456; }   // 256 MB
+    return 268435456;
+}
 
 struct Sets {
     h as tok.TokSet;
@@ -209,11 +231,11 @@ fn main(argc as i64, argv as *u8) as i32 {
 
     // ── pass 1: what tokens exist, and how often ──────────────────
     let is Sets as sets with mut;
-    if (tok.tokset_new(&sets.h, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
-    if (tok.tokset_new(&sets.p, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
-    if (tok.tokset_new(&sets.k, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
-    if (tok.tokset_new(&sets.v, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
-    if (tok.tokset_new(&sets.w, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+    if (tok.tokset_new(&sets.h, tab_slots(ctx.DICT_HOST), tab_arena(ctx.DICT_HOST)) != 0) { return 3; }
+    if (tok.tokset_new(&sets.p, tab_slots(ctx.DICT_PATH), tab_arena(ctx.DICT_PATH)) != 0) { return 3; }
+    if (tok.tokset_new(&sets.k, tab_slots(ctx.DICT_KEY),  tab_arena(ctx.DICT_KEY))  != 0) { return 3; }
+    if (tok.tokset_new(&sets.v, tab_slots(ctx.DICT_VAL),  tab_arena(ctx.DICT_VAL))  != 0) { return 3; }
+    if (tok.tokset_new(&sets.w, tab_slots(ctx.DICT_WORD), tab_arena(ctx.DICT_WORD)) != 0) { return 3; }
 
     let is counting.Counts as cnt with mut;
     let is model.Model as m with mut;

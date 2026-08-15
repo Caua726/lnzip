@@ -42,10 +42,11 @@ let is i64 as TIER_TINY with imut = 0;
 let is i64 as TIER_STD  with imut = 1;
 let is i64 as TIER_MAX  with imut = 2;
 
-// The largest model id the payload can name in its three bits. Ids are
-// allocated at publication and never reused; running out is a format break,
-// which is what the escape in the payload grammar is reserved for.
-let is i64 as MAX_MODEL_ID with imut = 7;
+// The largest model id a payload can name: seven direct, then an escape into
+// twelve more bits. Ids are allocated at publication and never reused, because
+// links in the wild point at them, so the space can only be spent — which is
+// exactly why it is this large rather than the eight it started as.
+let is i64 as MAX_MODEL_ID with imut = 4102;
 
 let is i64 as SEC_PROBS with imut = 1;
 
