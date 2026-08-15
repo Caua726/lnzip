@@ -1,14 +1,17 @@
 // =======================================================
 // cli/main.cst — lnzip, at the command line.
 //
-//   lnzip encode <url>   [-m model.lnzm] [-u] [-v]
-//   lnzip decode <code>  [-m model.lnzm] [-u]
+//   lnzip encode <url>   [-m model.lnzm] [-a alphabet] [-v]
+//   lnzip decode <code>  [-m model.lnzm]
 //   lnzip info           [-m model.lnzm]
 //
 //   -m  the model to code against; $LNZIP_MODEL otherwise; the built-in
 //       uniform model as a last resort, which compresses nothing
-//   -u  Unicode output instead of Base64URL
+//   -a  base32 | base64url | emoji | cjk   (-u is a synonym for cjk)
 //   -v  report sizes on stderr
+//
+// decode takes no alphabet: three of the four say which they are by being
+// themselves, and the fourth carries a marker.
 //
 // The model is not optional in any meaningful sense — a payload is only
 // decodable against the model it was coded against, and the built-in one
@@ -20,8 +23,7 @@ use "../core/errno.cst"  as errno;
 use "../model/fmt.cst"   as model;
 use "../model/ctx.cst"   as ctx;
 use "../codec/codec.cst" as codec;
-use "../fmt/b64url.cst"  as b64;
-use "../fmt/uni.cst"     as uni;
+use "../fmt/alpha.cst"   as alpha;
 use "../url/split.cst"   as us;
 use "caustic-compact/core/bytes.cst" as cb;
 use "std/io.cst"  as io;
@@ -46,9 +48,11 @@ fn streq(a as *u8, b as *u8) as i64 {
 
 fn usage() as i32 {
     io.write_str(io.STDERR, "usage:\n");
-    io.write_str(io.STDERR, "  lnzip encode <url>  [-m model.lnzm] [-u] [-v]\n");
-    io.write_str(io.STDERR, "  lnzip decode <code> [-m model.lnzm] [-u]\n");
+    io.write_str(io.STDERR, "  lnzip encode <url>  [-m model.lnzm] [-a alphabet] [-v]\n");
+    io.write_str(io.STDERR, "  lnzip decode <code> [-m model.lnzm]\n");
     io.write_str(io.STDERR, "  lnzip info          [-m model.lnzm]\n");
+    io.write_str(io.STDERR, "\nalphabets: base32 (5 bits) base64url (6) emoji (10) cjk (14)\n");
+    io.write_str(io.STDERR, "  -u is a synonym for -a cjk. decode detects the alphabet itself.\n");
     return 2;
 }
 
@@ -68,25 +72,51 @@ fn main(argc as i64, argv as *u8) as i32 {
 
     let is *u8 as mpath with mut = cast(*u8, 0);
     let is *u8 as arg   with mut = cast(*u8, 0);
-    let is i64 as want_uni with mut = 0;
+    let is i64 as alph with mut = alpha.ALPHA_B64;
     let is i64 as verbose  with mut = 0;
 
+    // Flat rather than a chain of nested elses: a flag per option and one
+    // fallthrough for the positional argument. The nested form is where an
+    // unbalanced brace hides.
     let is i64 as i with mut = 2;
     while (i < env.argc()) {
         let is *u8 as a = env.argv(i);
+        let is i64 as handled with mut = 0;
+
         if (streq(a, "-m") == 1) {
             i = i + 1;
             if (i >= env.argc()) { return usage(); }
             mpath = env.argv(i);
+            handled = 1;
         }
-        else { if (streq(a, "-u") == 1) { want_uni = 1; }
-        else { if (streq(a, "-v") == 1) { verbose = 1; }
-        else {
+        if (streq(a, "-a") == 1) {
+            i = i + 1;
+            if (i >= env.argc()) { return usage(); }
+            let is *u8 as nm = env.argv(i);
+            let is i64 as k with mut = 0;
+            let is i64 as found with mut = 0;
+            while (k < alpha.NALPHA) {
+                if (streq(nm, alpha.alpha_name(k)) == 1) { alph = k; found = 1; }
+                k = k + 1;
+            }
+            if (found == 0) {
+                io.write_str(io.STDERR, "unknown alphabet: ");
+                io.write_str(io.STDERR, nm);
+                io.write_str(io.STDERR, "  (base32 base64url emoji cjk)\n");
+                return 2;
+            }
+            handled = 1;
+        }
+        if (streq(a, "-u") == 1) { alph = alpha.ALPHA_CJK; handled = 1; }
+        if (streq(a, "-v") == 1) { verbose = 1; handled = 1; }
+
+        if (handled == 0) {
             if (cast(i64, arg) != 0) { return usage(); }
             arg = a;
-        } } }
+        }
         i = i + 1;
     }
+
     if (cast(i64, mpath) == 0) { mpath = env.getenv("LNZIP_MODEL"); }
 
     // ── open a model ──────────────────────────────────────────────
@@ -136,9 +166,7 @@ fn main(argc as i64, argv as *u8) as i32 {
         let is i64 as w = codec.lnz_encode(arg, n, &m, &pay);
         if (w < 0) { return fail("encode", w); }
 
-        let is i64 as c with mut = 0;
-        if (want_uni == 1) { c = uni.uni_encode(pay.ptr, pay.len, textbuf, CAP); }
-        else               { c = b64.b64_encode(pay.ptr, pay.len, textbuf, CAP); }
+        let is i64 as c with mut = alpha.alpha_encode(alph, pay.ptr, pay.len, textbuf, CAP);
         if (c < 0) { return fail("encode", c); }
 
         // A payload can legitimately be empty: a URL the model predicts almost
@@ -147,13 +175,9 @@ fn main(argc as i64, argv as *u8) as i32 {
         // zeros stands in — it decodes back to an empty payload, which is
         // exactly what the coder wants.
         if (c == 0) {
-            if (want_uni == 1) {
-                textbuf[0] = cast(u8, 0xE4); textbuf[1] = cast(u8, 0xB8); textbuf[2] = cast(u8, 0x80);
-                c = 3;
-            } else {
-                textbuf[0] = cast(u8, 65);   // 'A'
-                c = 1;
-            }
+            let is [1]u8 as zero;
+            zero[0] = cast(u8, 0);
+            c = alpha.alpha_encode(alph, cast(*u8, &zero), 1, textbuf, CAP);
         }
 
         io.write_bytes(io.STDOUT, textbuf, c);
@@ -163,8 +187,10 @@ fn main(argc as i64, argv as *u8) as i32 {
             io.write_str(io.STDERR, "url ");        io.write_int(io.STDERR, n);
             io.write_str(io.STDERR, " B -> payload "); io.write_int(io.STDERR, pay.len);
             io.write_str(io.STDERR, " B -> ");
-            if (want_uni == 1) { io.write_int(io.STDERR, c / 3); io.write_str(io.STDERR, " unicode chars ("); io.write_int(io.STDERR, c); io.write_str(io.STDERR, " utf-8 bytes)\n"); }
-            else               { io.write_int(io.STDERR, c); io.write_str(io.STDERR, " base64url chars\n"); }
+            io.write_int(io.STDERR, alpha.alpha_symbols(alph, pay.len));
+            io.write_str(io.STDERR, " "); io.write_str(io.STDERR, alpha.alpha_name(alph));
+            io.write_str(io.STDERR, " symbols ("); io.write_int(io.STDERR, c);
+            io.write_str(io.STDERR, " utf-8 bytes)\n");
         }
 
         cb.bytes_free(&pay);
@@ -178,9 +204,14 @@ fn main(argc as i64, argv as *u8) as i32 {
         let is *u8 as pay = mem.core.mmap_anon(CAP);
         if (cast(i64, pay) <= 0) { return fail("alloc", errno.E_OOM); }
 
-        let is i64 as pn with mut = 0;
-        if (want_uni == 1) { pn = uni.uni_decode(arg, n, pay, CAP); }
-        else               { pn = b64.b64_decode(arg, n, pay, CAP); }
+        // Which alphabet, unless one was named: three of the four say so by
+        // being themselves, and the fourth carries a marker.
+        let is i64 as use_a with mut = alph;
+        if (env.argc() > 0) {
+            let is i64 as det = alpha.alpha_detect(arg, n);
+            if (det >= 0) { use_a = det; }
+        }
+        let is i64 as pn = alpha.alpha_decode(use_a, arg, n, pay, CAP);
         if (pn < 0) { return fail("decode", pn); }
 
         let is i64 as d = codec.lnz_decode(pay, pn, &m, textbuf, us.MAX_URL);

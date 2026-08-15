@@ -1,0 +1,127 @@
+// =======================================================
+// tests/test_alpha.cst — every alphabet round-trips, and says which it is.
+//
+// Bit repacking is the kind of code that works for every length someone tried
+// by hand and fails on the one where the accumulator straddles a symbol
+// boundary, so every length from 0 to 200 bytes is checked in every alphabet
+// rather than a handful of interesting ones.
+//
+// The other half is detection. Three of the four alphabets are disjoint and
+// name themselves; base32 is a strict subset of Base64URL and cannot, which is
+// why it carries a marker. Getting that wrong does not fail loudly — it
+// decodes a different URL — so it is tested from both directions: every code
+// must be detected as what it is, and a base64 code that happens to use only
+// base32's characters must still read as base64.
+//
+// Exit code is which check failed.
+// =======================================================
+
+use "../fmt/alpha.cst"  as alpha;
+use "../core/errno.cst" as errno;
+use "std/io.cst"        as io;
+
+let is i64 as _rs with mut = 2463534242;
+fn rnd() as i64 {
+    let is i64 as x with mut = _rs;
+    x = x ^ ((x << 13) & 0x7FFFFFFFFFFFFFFF);
+    x = x ^ ((x >> 7) & 0x00FFFFFFFFFFFFFF);
+    x = x ^ ((x << 17) & 0x7FFFFFFFFFFFFFFF);
+    if (x == 0) { x = 2463534242; }
+    _rs = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+
+fn main() as i32 {
+    let is [256]u8  as payload;
+    let is [2048]u8 as text;
+    let is [512]u8  as back;
+
+    let is i64 as a with mut = 0;
+    while (a < alpha.NALPHA) {
+        let is i64 as n with mut = 0;
+        while (n <= 200) {
+            let is i64 as i with mut = 0;
+            while (i < n) { payload[i] = cast(u8, rnd() & 0xFF); i = i + 1; }
+
+            let is i64 as w = alpha.alpha_encode(a, cast(*u8, &payload), n,
+                                                 cast(*u8, &text), 2048);
+            if (w < 0) { return 1; }
+            if (w > alpha.alpha_size_bytes(a, n)) { return 2; }
+
+            let is i64 as d = alpha.alpha_decode(a, cast(*u8, &text), w,
+                                                 cast(*u8, &back), 512);
+            if (d < n)     { return 3; }
+            if (d > n + 1) { return 4; }
+            i = 0;
+            while (i < n) {
+                if (back[i] != payload[i]) { return 5; }
+                i = i + 1;
+            }
+            // Any byte past the original is padding, and padding is zero — the
+            // range decoder reads zeros off the end of its buffer by design,
+            // so a non-zero one would change what it reads.
+            if (d == n + 1) {
+                if (back[n] != 0) { return 6; }
+            }
+
+            // Detection must name the alphabet the code was written in.
+            if (n > 0) {
+                if (alpha.alpha_detect(cast(*u8, &text), w) != a) { return 7; }
+            }
+            n = n + 1;
+        }
+        a = a + 1;
+    }
+
+    // ── base32 is a subset of base64, and the marker is what separates them ──
+    //
+    // Without it a base64 code that happened to avoid lowercase would decode
+    // as base32 and produce a different URL, in silence.
+    let is *u8 as upper = "ABCDEFGH234567";
+    if (alpha.alpha_detect(upper, 14) != alpha.ALPHA_B64) { return 10; }
+    let is *u8 as marked = "~ABCDEFGH234567";
+    if (alpha.alpha_detect(marked, 15) != alpha.ALPHA_B32) { return 11; }
+    // A base32 code without its marker is refused rather than guessed at.
+    if (alpha.alpha_decode(alpha.ALPHA_B32, upper, 14, cast(*u8, &back), 512)
+        != errno.E_BADCHAR) { return 12; }
+
+    // ── the widths are what they claim ──────────────────────────────
+    if (alpha.alpha_bits(alpha.ALPHA_B32) != 5)    { return 20; }
+    if (alpha.alpha_bits(alpha.ALPHA_B64) != 6)    { return 21; }
+    if (alpha.alpha_bits(alpha.ALPHA_EMOJI) != 10) { return 22; }
+    if (alpha.alpha_bits(alpha.ALPHA_CJK) != 14)   { return 23; }
+    // 96 bits: sixteen base64 characters, seven CJK, ten emoji, twenty base32.
+    if (alpha.alpha_symbols(alpha.ALPHA_B64, 12) != 16) { return 24; }
+    if (alpha.alpha_symbols(alpha.ALPHA_CJK, 12) != 7)  { return 25; }
+    if (alpha.alpha_symbols(alpha.ALPHA_EMOJI, 12) != 10) { return 26; }
+    if (alpha.alpha_symbols(alpha.ALPHA_B32, 12) != 20) { return 27; }
+
+    // ── every symbol maps back to itself ────────────────────────────
+    a = 0;
+    while (a < alpha.NALPHA) {
+        let is i64 as v with mut = 0;
+        while (v < alpha.alpha_size(a)) {
+            if (alpha.alpha_val(a, alpha.alpha_cp(a, v)) != v) { return 30; }
+            v = v + 1;
+        }
+        a = a + 1;
+    }
+
+    // ── malformed input is refused, never guessed ───────────────────
+    text[0] = cast(u8, 0xC3); text[1] = cast(u8, 0xA9);          // valid UTF-8, wrong block
+    if (alpha.alpha_decode(alpha.ALPHA_CJK, cast(*u8, &text), 2,
+                           cast(*u8, &back), 512) != errno.E_BADCHAR) { return 40; }
+    text[0] = cast(u8, 0xE4); text[1] = cast(u8, 0xB8);          // truncated
+    if (alpha.alpha_decode(alpha.ALPHA_CJK, cast(*u8, &text), 2,
+                           cast(*u8, &back), 512) != errno.E_BADCHAR) { return 41; }
+    text[0] = cast(u8, 0x80);                                     // a lone continuation
+    if (alpha.alpha_decode(alpha.ALPHA_CJK, cast(*u8, &text), 1,
+                           cast(*u8, &back), 512) != errno.E_BADCHAR) { return 42; }
+    if (alpha.alpha_decode(alpha.ALPHA_B64, "!!!!", 4,
+                           cast(*u8, &back), 512) != errno.E_BADCHAR) { return 43; }
+    if (alpha.alpha_encode(alpha.ALPHA_CJK, cast(*u8, &payload), 100,
+                           cast(*u8, &text), 4) != errno.E_SPACE)     { return 44; }
+
+    io.write_str(io.STDOUT, "alpha: 4 alphabets, 0..200 bytes, detected and refused correctly\n");
+    return 0;
+}

@@ -78,9 +78,10 @@ target "bundle" {
 script "web" {
     "caustic-mk build embed"
     "caustic-mk build bundle"
-    "./build/embed models/tiny.lnzm wasm/model_embedded.cst"
+    "./build/embed models/enpt-tiny.lnzm wasm/model_embedded.cst"
     "caustic --target=wasm32-wasi --path .caustic/deps -q wasm/lnzip_wasm.cst -o build/lnzip.wasm"
     "cp web/index.html web/lnzip.js web/qr.js build/"
+    "cp models/enpt2.lnzm build/standard.lnzm"
     "./build/bundle web/index.html build/lnzip.wasm build/lnzip.html"
 }
 

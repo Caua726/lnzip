@@ -29,8 +29,7 @@
 use "../core/errno.cst"  as errno;
 use "../model/fmt.cst"   as model;
 use "../codec/codec.cst" as codec;
-use "../fmt/b64url.cst"  as b64;
-use "../fmt/uni.cst"     as uni;
+use "../fmt/alpha.cst"   as alpha;
 use "../url/split.cst"   as us;
 use "./model_embedded.cst" as embedded;
 use "caustic-compact/core/bytes.cst" as cb;
@@ -129,7 +128,15 @@ fn _pay() as *cb.Bytes {
 // URL of `len` bytes at wasm_inbuf() -> code at wasm_outbuf().
 // `unicode` selects the CJK alphabet over Base64URL. Returns the number of
 // bytes written (UTF-8 bytes, for the Unicode alphabet), or a negative errno.
-fn wasm_encode(len as i64, unicode as i64, slot as i64) as i64 {
+fn wasm_nalpha() as i64 { return alpha.NALPHA; }
+fn wasm_alpha_bits(a as i64) as i64 { return alpha.alpha_bits(a); }
+
+// Which alphabet the code in the input buffer is written in, or -1.
+fn wasm_alpha_detect(len as i64) as i64 {
+    return alpha.alpha_detect(cast(*u8, &_IN), len);
+}
+
+fn wasm_encode(len as i64, alph as i64, slot as i64) as i64 {
     if (_ready == 0) {
         let is i64 as rc1 = wasm_init();
         if (rc1 != 0) { return rc1; }
@@ -148,9 +155,8 @@ fn wasm_encode(len as i64, unicode as i64, slot as i64) as i64 {
     let is i64 as w = codec.lnz_encode(cast(*u8, &_IN), n, mm, p);
     if (w < 0) { return cast(i64, w); }
 
-    let is i64 as c with mut = 0;
-    if (unicode == 1) { c = uni.uni_encode(p.ptr, p.len, cast(*u8, &_OUT), CAP); }
-    else              { c = b64.b64_encode(p.ptr, p.len, cast(*u8, &_OUT), CAP); }
+    if (alph < 0 || alph >= alpha.NALPHA) { return errno.E_BADCHAR; }
+    let is i64 as c with mut = alpha.alpha_encode(alph, p.ptr, p.len, cast(*u8, &_OUT), CAP);
     if (c < 0) { return cast(i64, c); }
 
     // A URL the model predicts almost perfectly carries under a bit, and the
@@ -158,13 +164,10 @@ fn wasm_encode(len as i64, unicode as i64, slot as i64) as i64 {
     // fragment is not a link, so one character of zeros stands in — it decodes
     // back to an empty payload, which is what the coder meant.
     if (c == 0) {
-        if (unicode == 1) {
-            _OUT[0] = cast(u8, 0xE4); _OUT[1] = cast(u8, 0xB8); _OUT[2] = cast(u8, 0x80);
-            c = 3;
-        } else {
-            _OUT[0] = cast(u8, 65);
-            c = 1;
-        }
+        let is [1]u8 as zero;
+        zero[0] = cast(u8, 0);
+        c = alpha.alpha_encode(alph, cast(*u8, &zero), 1, cast(*u8, &_OUT), CAP);
+        if (c < 0) { return cast(i64, c); }
     }
     return cast(i64, c);
 }
@@ -174,7 +177,7 @@ fn wasm_encode(len as i64, unicode as i64, slot as i64) as i64 {
 // This runs on whatever was in the address bar, so every failure is an error
 // and none of them is a guess. A fragment that is not one of ours comes back
 // negative rather than as some plausible URL.
-fn wasm_decode(len as i64, unicode as i64) as i64 {
+fn wasm_decode(len as i64, alph as i64) as i64 {
     if (_ready == 0) {
         let is i64 as rc1 = wasm_init();
         if (rc1 != 0) { return rc1; }
@@ -187,9 +190,8 @@ fn wasm_decode(len as i64, unicode as i64) as i64 {
     cb.bytes_reset(p);
     if (cb.bytes_reserve(p, CAP) < 0) { return cast(i64, errno.E_OOM); }
 
-    let is i64 as pn with mut = 0;
-    if (unicode == 1) { pn = uni.uni_decode(cast(*u8, &_IN), n, p.ptr, CAP); }
-    else              { pn = b64.b64_decode(cast(*u8, &_IN), n, p.ptr, CAP); }
+    if (alph < 0 || alph >= alpha.NALPHA) { return errno.E_BADCHAR; }
+    let is i64 as pn = alpha.alpha_decode(alph, cast(*u8, &_IN), n, p.ptr, CAP);
     if (pn < 0) { return cast(i64, pn); }
 
     // A payload names its model. Try the embedded one, then whatever was
@@ -261,6 +263,9 @@ fn main() as i32 {
     keep = keep + cast(i64, fn_ptr(wasm_encode));
     keep = keep + cast(i64, fn_ptr(wasm_decode));
     keep = keep + cast(i64, fn_ptr(wasm_scheme_ok));
+    keep = keep + cast(i64, fn_ptr(wasm_nalpha));
+    keep = keep + cast(i64, fn_ptr(wasm_alpha_bits));
+    keep = keep + cast(i64, fn_ptr(wasm_alpha_detect));
     if (keep == 0) { return 1; }
     return 0;
 }

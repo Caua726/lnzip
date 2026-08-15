@@ -296,11 +296,8 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
       </div>
       <div class="controls">
         <div class="ctl">
-          <span class="ctl-label">Characters</span>
-          <div class="seg" role="group" aria-label="Character set">
-            <button type="button" id="setAscii" aria-pressed="true">ASCII</button>
-            <button type="button" id="setUni" aria-pressed="false">Unicode</button>
-          </div>
+          <span class="ctl-label">Alphabet</span>
+          <div class="seg" role="group" aria-label="Alphabet" id="alphaSeg"></div>
         </div>
         <div class="ctl">
           <span class="ctl-label">Model</span>
@@ -323,9 +320,10 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
           <input id="base-input" type="text" spellcheck="false" autocomplete="off">
         </div>
       </div>
+      <p class="hint" id="alphaNote"></p>
       <p class="hint" id="modelNote">Tiny is built into this page and answers instantly.
-        Standard compresses about a fifth better and is fetched once, then cached —
-        but a link made with it can only be opened by someone who fetches it too.</p>
+        Standard compresses a little better and is fetched once, then cached — but a
+        link made with it can only be opened by someone who fetches it too.</p>
     </form>
   </div>
 
@@ -447,7 +445,7 @@ const WASM_B64 = "";
 
     let out;
     try {
-      out = lz.decode(code, { unicode: globalThis.lnzip.isUnicodeCode(code) });
+      out = lz.decode(code);
     } catch (e) {
       state.textContent = 'That code does not decode: ' + e.message;
       $('resolveBar').hidden = true;
@@ -482,6 +480,7 @@ const WASM_B64 = "";
     let unicode = false;
     let link = '';
     let slot = 0;                 // 0 = the model in this page, 1 = one fetched
+    let alphabet = 1;             // base64url
     let ecLevel = 'M';
     let base = selfBase();
 
@@ -502,13 +501,36 @@ const WASM_B64 = "";
 
     const press = (id, on) => $(id).setAttribute('aria-pressed', String(on));
 
-    const setMode = (uni) => {
-      unicode = uni;
-      press('setAscii', !uni); press('setUni', uni);
+    // The alphabets come from the module rather than being listed here, so
+    // adding one is a change in exactly one place.
+    const WHY = {
+      base32: 'uppercase and digits only, and case-insensitive — the one to pick ' +
+              'if a link has to be read aloud or typed from a screen.',
+      base64url: 'the default. Every character is legal in a URL unescaped, so the ' +
+                 'link survives being pasted anywhere.',
+      emoji: '1024 pictographs. Fewer symbols than base64 and impossible to ' +
+             'mistype, but some platforms draw some of them as a blank box.',
+      cjk: 'the fewest characters of any alphabet here. On the wire each one is ' +
+           'three bytes, so the link is shorter to read and longer to store.',
+    };
+    const seg = $('alphaSeg');
+    for (const a of lz.alphabets) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.id = 'alpha' + a.index;
+      b.textContent = a.name;
+      b.setAttribute('aria-pressed', String(a.index === alphabet));
+      b.addEventListener('click', () => setAlphabet(a.index));
+      seg.append(b);
+    }
+    const setAlphabet = (ix) => {
+      alphabet = ix;
+      for (const a of lz.alphabets) press('alpha' + a.index, a.index === ix);
+      const a = lz.alphabets[ix];
+      $('alphaNote').textContent = a.bits + ' bits a symbol — ' + WHY[a.name];
       if (!$('result').hidden) run();
     };
-    $('setAscii').addEventListener('click', () => setMode(false));
-    $('setUni').addEventListener('click', () => setMode(true));
+    setAlphabet(alphabet);
 
     // L through H: more correction survives more damage — H reads with about
     // a third of the code obscured — and pays for it in a larger version.
@@ -575,7 +597,7 @@ const WASM_B64 = "";
         el.append(s);
       });
 
-      $('gOut').innerHTML = '<b>' + chars.length + '</b><span>characters</span>';
+      $('gOut').innerHTML = '<b>' + chars.length + '</b><span>symbols</span>';
       $('ruler').style.width = 'min(' + chars.length + 'ch, 100%)';
 
       // Fewer characters is a lower QR version, which is a code that scans
@@ -583,8 +605,19 @@ const WASM_B64 = "";
       const q = globalThis.qr.encode(link, { level: ecLevel });
       if (q) {
         $('qr').innerHTML = globalThis.qr.svg(q, { quiet: 3 });
-        $('qrCap').textContent = 'version ' + q.version + ' · ' + q.size + '×' + q.size +
-                                 ' modules · correction ' + q.level;
+        let cap = 'version ' + q.version + ' · ' + q.size + '×' + q.size +
+                  ' modules · correction ' + q.level;
+        // Fewest characters is not smallest code. A QR carries bytes, and a
+        // CJK ideograph is three of them where a Base64URL character is one —
+        // so the alphabet that looks shortest to a reader can be the one that
+        // scans from furthest away, and it is worth saying which.
+        const alt = globalThis.qr.encode(base + '#' +
+                      lz.encode($('url').value.trim(), { alphabet: 1, slot: slot }),
+                      { level: ecLevel });
+        if (alt && alt.version < q.version) {
+          cap += ' — base64url would fit version ' + alt.version;
+        }
+        $('qrCap').textContent = cap;
         $('qrWrap').hidden = false;
       } else {
         $('qrWrap').hidden = true;
@@ -607,7 +640,7 @@ const WASM_B64 = "";
       const url = $('url').value.trim();
       if (!url) { setError(''); $('result').hidden = true; return; }
       try {
-        paint(url, lz.encode(url, { unicode: unicode, slot: slot }));
+        paint(url, lz.encode(url, { alphabet: alphabet, slot: slot }));
         setError('');
       } catch (e) {
         setError(e.message);
@@ -651,7 +684,7 @@ const WASM_B64 = "";
 
       let out;
       try {
-        out = lz.decode(code, { unicode: globalThis.lnzip.isUnicodeCode(code) });
+        out = lz.decode(code);
       } catch (e) {
         expandErr.hidden = false;
         expandErr.textContent = e.message;

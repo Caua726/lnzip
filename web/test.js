@@ -46,17 +46,25 @@ function check(name, ok, detail) {
   check('model loaded', lz.modelId >= 0, 'id ' + lz.modelId);
   check('max url reported', lz.maxUrl === 8192, String(lz.maxUrl));
 
-  let raw = 0, ascii = 0, uni = 0;
+  // Every alphabet, every URL, both directions — and decoded without being
+  // told which alphabet it was, because that is how a link arrives.
+  let raw = 0;
+  const totals = new Map(lz.alphabets.map((a) => [a.name, 0]));
   for (const u of URLS) {
-    const a = lz.encode(u);
-    const c = lz.encode(u, { unicode: true });
-    check('base64 round-trip: ' + u.slice(0, 40), lz.decode(a).url === u);
-    check('unicode round-trip: ' + u.slice(0, 40), lz.decode(c, { unicode: true }).url === u);
-    check('alphabet is detectable: ' + u.slice(0, 40),
-          !globalThis.lnzip.isUnicodeCode(a) && globalThis.lnzip.isUnicodeCode(c));
     raw += Buffer.byteLength(u);
-    ascii += a.length;
-    uni += [...c].length;
+    for (const a of lz.alphabets) {
+      const c = lz.encode(u, { alphabet: a.index });
+      check(a.name + ' round-trip: ' + u.slice(0, 36), lz.decode(c).url === u);
+      totals.set(a.name, totals.get(a.name) + [...c].length);
+    }
+  }
+  // Symbol widths must fall in the order the alphabets claim: more bits a
+  // symbol is fewer symbols, always.
+  const order = [...lz.alphabets].sort((x, y) => x.bits - y.bits).map((a) => a.name);
+  for (let i = 1; i < order.length; i++) {
+    check('wider alphabet is shorter: ' + order[i - 1] + ' vs ' + order[i],
+          totals.get(order[i]) <= totals.get(order[i - 1]),
+          totals.get(order[i]) + ' vs ' + totals.get(order[i - 1]));
   }
 
   // Only http and https may be navigated to. With no database behind it, a
@@ -79,7 +87,7 @@ function check(name, ok, detail) {
   // Nothing here may throw anything but a clean Error, and nothing may hang.
   for (const junk of ['', '!!!!', 'AAAA', '一丁', 'x'.repeat(70000), '=', '+/']) {
     try {
-      lz.decode(junk, { unicode: globalThis.lnzip.isUnicodeCode(junk) });
+      lz.decode(junk);
     } catch (e) {
       check('junk rejected cleanly', e instanceof Error && e.message.length > 0);
     }
@@ -95,7 +103,7 @@ function check(name, ok, detail) {
   }
 
   console.log('web: ' + URLS.length + ' urls, ' + raw + ' B -> ' +
-              ascii + ' base64 chars / ' + uni + ' unicode chars');
+              [...totals].map(([n, v]) => v + ' ' + n).join(' / '));
   if (failed === 0) console.log('web: wasm boundary, alphabets and scheme gate all hold');
   else console.error(failed + ' checks failed');
   process.exit(failed === 0 ? 0 : 1);

@@ -4,6 +4,11 @@
 //   caustic-mk build embed
 //   ./build/embed models/tiny.lnzm wasm/model_embedded.cst
 //
+// Level 6 rather than 9, deliberately: most of a model is a probability table
+// whose untouched contexts are all the same two bytes, so it deflates to six
+// percent at any level, and level 9 spent six minutes on ten megabytes to find
+// a fraction of a percent more.
+//
 // The browser build has no filesystem, so the model has to travel inside the
 // module. It travels deflated: a trained Tiny model is about a megabyte of
 // which some ninety percent is the untouched prior — every context the corpus
@@ -72,7 +77,7 @@ fn main(argc as i64, argv as *u8) as i32 {
     if (got != size) { return 3; }
 
     let is cb.Bytes as packed with mut = cb.bytes_new(size / 4);
-    if (zlib.zlib_compress(raw, size, &packed, 9) < 0) {
+    if (zlib.zlib_compress(raw, size, &packed, 6) < 0) {
         io.write_str(io.STDERR, "compress failed\n");
         return 3;
     }

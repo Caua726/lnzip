@@ -117,9 +117,15 @@ async function load(source) {
   const rc = call(ex.wasm_init);
   if (rc !== 0) throw new Error('lnzip: ' + describe(rc));
 
+  // The alphabets the module carries, by index. Names and widths come from
+  // the module rather than being repeated here, so adding one is a change in
+  // exactly one place.
+  const ALPHABETS = ['base32', 'base64url', 'emoji', 'cjk'];
+
   return {
     modelId: call(ex.wasm_model_id),
     maxUrl: call(ex.wasm_max_url),
+    alphabets: ALPHABETS.map((name, i) => ({ name: name, index: i, bits: call(ex.wasm_alpha_bits, i) })),
 
     // Adopt a model fetched at run time as the second slot, and return its
     // id. Nothing is copied: the bytes go straight into the module's memory
@@ -140,12 +146,12 @@ async function load(source) {
     // `slot` is 0 for the model built into the page and 1 for one loaded with
     // loadModel. A code names its model, so this choice follows the link
     // forever.
-    encode(url, { unicode = false, slot = 0 } = {}) {
+    encode(url, { alphabet = 1, slot = 0 } = {}) {
       const bytes = enc.encode(url);
       if (bytes.length === 0) throw new Error('nothing to encode');
       if (bytes.length > cap) throw new Error('that URL is too long');
       inBuf().set(bytes);
-      const n = call(ex.wasm_encode, bytes.length, unicode ? 1 : 0, slot);
+      const n = call(ex.wasm_encode, bytes.length, alphabet, slot);
       if (n < 0) throw new Error(describe(n));
       return dec.decode(outBuf().slice(0, n));
     },
@@ -154,12 +160,19 @@ async function load(source) {
     // but named a scheme this page will not navigate to — the check runs in
     // wasm rather than here, because a check written in JavaScript is a check
     // someone edits out of the page.
-    decode(code, { unicode = false } = {}) {
+    // The alphabet is detected rather than asked for: three of the four say
+    // which they are by being themselves, and the fourth carries a marker.
+    decode(code, { alphabet = null } = {}) {
       const bytes = enc.encode(code);
       if (bytes.length === 0) throw new Error('empty code');
       if (bytes.length > cap) throw new Error('that code is too long');
       inBuf().set(bytes);
-      const n = call(ex.wasm_decode, bytes.length, unicode ? 1 : 0);
+      let a = alphabet;
+      if (a === null) {
+        a = call(ex.wasm_alpha_detect, bytes.length);
+        if (a < 0) throw new Error('this is not written in any alphabet lnzip uses');
+      }
+      const n = call(ex.wasm_decode, bytes.length, a);
       if (n < 0) throw new Error(describe(n));
       const url = dec.decode(outBuf().slice(0, n));
       return { url, safe: call(ex.wasm_scheme_ok, n) === 1 };
@@ -167,10 +180,8 @@ async function load(source) {
   };
 }
 
-// A code is Unicode when it is not spelled in the Base64URL alphabet. The two
-// alphabets are disjoint by construction, so this needs no marker byte inside
-// the payload — which would have cost every link a character to say something
-// the characters already say.
+// Detection lives in the wasm now, where the alphabet tables are. This is
+// kept only so callers that had it keep working.
 function isUnicodeCode(code) {
   return /[^A-Za-z0-9_-]/.test(code);
 }

@@ -1,0 +1,309 @@
+// =======================================================
+// fmt/alpha.cst — the payload as symbols, in whichever alphabet suits.
+//
+// An alphabet is a set of code points and nothing more. Packing bits into one
+// is the same operation every time, so there is one implementation and a table
+// of alphabets rather than a module each.
+//
+// EVERY ALPHABET HERE IS A POWER OF TWO, and that is a decision rather than an
+// accident. A fragment can legally carry about eighty unescaped characters,
+// and a radix-80 alphabet would carry 6.32 bits each against Base64URL's 6 —
+// four percent. Paying for it means base conversion instead of bit packing:
+// the whole payload as one integer, divided repeatedly, quadratic in its
+// length and impossible to stream. Four percent does not buy that, and the
+// extra characters are the ones chat clients stop underlining halfway through.
+//
+//   base32   5 bits   A-Z 2-7, case-insensitive, survives being read aloud;
+//                     written with a leading '~', for the reason below
+//   base64   6 bits   the default: every character legal in a fragment or path
+//   emoji   10 bits   1024 pictographs, for a link meant to be seen
+//   cjk     14 bits   16384 ideographs, the fewest characters of any of them
+//
+// WHAT "FEWEST CHARACTERS" MEANS. On the wire a CJK or emoji code point is
+// three or four UTF-8 bytes, and percent-encoded in a URL it is nine or twelve
+// characters. What shrinks is what a person sees and copies, because browsers
+// display and accept the decoded form. It is the right output for a link that
+// gets pasted into a message and the wrong one for a link that goes into a
+// config file.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+
+let is i64 as ALPHA_B32   with imut = 0;
+let is i64 as ALPHA_B64   with imut = 1;
+let is i64 as ALPHA_EMOJI with imut = 2;
+let is i64 as ALPHA_CJK   with imut = 3;
+let is i64 as NALPHA      with imut = 4;
+
+fn alpha_bits(a as i64) as i64 {
+    if (a == ALPHA_B32)   { return 5; }
+    if (a == ALPHA_B64)   { return 6; }
+    if (a == ALPHA_EMOJI) { return 10; }
+    return 14;
+}
+
+fn alpha_size(a as i64) as i64 { return 1 << alpha_bits(a); }
+
+// Whether the alphabet is plain ASCII, which is what decides whether a code
+// can go in a path as well as a fragment.
+fn alpha_is_ascii(a as i64) as i64 {
+    if (a == ALPHA_B32) { return 1; }
+    if (a == ALPHA_B64) { return 1; }
+    return 0;
+}
+
+fn alpha_name(a as i64) as *u8 {
+    if (a == ALPHA_B32)   { return "base32"; }
+    if (a == ALPHA_B64)   { return "base64url"; }
+    if (a == ALPHA_EMOJI) { return "emoji"; }
+    return "cjk";
+}
+
+// ---- symbol tables ---------------------------------------------------
+//
+// Returned from functions rather than held in globals: the wasm backend does
+// not initialise a global declared from a string literal, and a table that
+// read as zeros there would make every link undecodable in a browser.
+
+fn _b32() as *u8 { return "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; }
+fn _b64() as *u8 {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+}
+
+// The pictograph alphabet, as three contiguous assigned runs. Contiguous runs
+// rather than a hand-picked list because a list is 1024 chances to include a
+// code point that some platform draws as a blank box — a run that has been
+// assigned since Unicode 10 is one decision instead of a thousand.
+let is i64 as _E0_AT with imut = 0x1F300;   // pictographs
+let is i64 as _E0_N  with imut = 768;
+let is i64 as _E1_AT with imut = 0x1F600;   // emoticons
+let is i64 as _E1_N  with imut = 80;
+let is i64 as _E2_AT with imut = 0x1F900;   // supplemental
+let is i64 as _E2_N  with imut = 176;
+
+let is i64 as _CJK_AT with imut = 0x4E00;   // CJK Unified Ideographs
+
+// Symbol index to code point.
+fn alpha_cp(a as i64, v as i64) as i64 {
+    if (a == ALPHA_B32) { return cast(i64, _b32()[v]); }
+    if (a == ALPHA_B64) { return cast(i64, _b64()[v]); }
+    if (a == ALPHA_CJK) { return _CJK_AT + v; }
+    if (v < _E0_N)          { return _E0_AT + v; }
+    if (v < _E0_N + _E1_N)  { return _E1_AT + (v - _E0_N); }
+    return _E2_AT + (v - _E0_N - _E1_N);
+}
+
+// Code point back to symbol index, or -1 when it is not in this alphabet.
+fn alpha_val(a as i64, cp as i64) as i64 {
+    if (a == ALPHA_B32) {
+        if (cp >= 65 && cp <= 90) { return cp - 65; }        // A-Z
+        if (cp >= 50 && cp <= 55) { return cp - 50 + 26; }   // 2-7
+        return 0 - 1;
+    }
+    if (a == ALPHA_B64) {
+        if (cp >= 65 && cp <= 90)  { return cp - 65; }
+        if (cp >= 97 && cp <= 122) { return cp - 71; }
+        if (cp >= 48 && cp <= 57)  { return cp + 4; }
+        if (cp == 45) { return 62; }
+        if (cp == 95) { return 63; }
+        return 0 - 1;
+    }
+    if (a == ALPHA_CJK) {
+        if (cp < _CJK_AT) { return 0 - 1; }
+        if (cp >= _CJK_AT + 16384) { return 0 - 1; }
+        return cp - _CJK_AT;
+    }
+    if (cp >= _E0_AT && cp < _E0_AT + _E0_N) { return cp - _E0_AT; }
+    if (cp >= _E1_AT && cp < _E1_AT + _E1_N) { return cp - _E1_AT + _E0_N; }
+    if (cp >= _E2_AT && cp < _E2_AT + _E2_N) { return cp - _E2_AT + _E0_N + _E1_N; }
+    return 0 - 1;
+}
+
+// ---- UTF-8 -----------------------------------------------------------
+
+fn _cp_len(cp as i64) as i64 {
+    if (cp < 0x80)    { return 1; }
+    if (cp < 0x800)   { return 2; }
+    if (cp < 0x10000) { return 3; }
+    return 4;
+}
+
+fn _put_cp(out as *u8, at as i64, cp as i64) as i64 {
+    if (cp < 0x80) { out[at] = cast(u8, cp); return 1; }
+    if (cp < 0x800) {
+        out[at]     = cast(u8, 0xC0 | (cp >> 6));
+        out[at + 1] = cast(u8, 0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[at]     = cast(u8, 0xE0 | (cp >> 12));
+        out[at + 1] = cast(u8, 0x80 | ((cp >> 6) & 0x3F));
+        out[at + 2] = cast(u8, 0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[at]     = cast(u8, 0xF0 | (cp >> 18));
+    out[at + 1] = cast(u8, 0x80 | ((cp >> 12) & 0x3F));
+    out[at + 2] = cast(u8, 0x80 | ((cp >> 6) & 0x3F));
+    out[at + 3] = cast(u8, 0x80 | (cp & 0x3F));
+    return 4;
+}
+
+// Reads one code point, writing its byte length through `used`. Returns -1 on
+// anything malformed — this runs on whatever arrived in the address bar, and a
+// truncated sequence must be a refusal rather than a guess.
+fn _get_cp(src as *u8, at as i64, n as i64, used as *i64) as i64 {
+    if (at >= n) { used[0] = 0; return 0 - 1; }
+    let is i64 as b0 = cast(i64, src[at]);
+    if (b0 < 0x80) { used[0] = 1; return b0; }
+
+    let is i64 as need with mut = 0;
+    let is i64 as cp with mut = 0;
+    if ((b0 & 0xE0) == 0xC0) { need = 1; cp = b0 & 0x1F; }
+    else { if ((b0 & 0xF0) == 0xE0) { need = 2; cp = b0 & 0x0F; }
+    else { if ((b0 & 0xF8) == 0xF0) { need = 3; cp = b0 & 0x07; }
+    else { used[0] = 0; return 0 - 1; } } }
+
+    if (at + need >= n) { used[0] = 0; return 0 - 1; }
+    let is i64 as i with mut = 1;
+    while (i <= need) {
+        let is i64 as b = cast(i64, src[at + i]);
+        if ((b & 0xC0) != 0x80) { used[0] = 0; return 0 - 1; }
+        cp = (cp << 6) | (b & 0x3F);
+        i = i + 1;
+    }
+    used[0] = need + 1;
+    return cp;
+}
+
+// ---- packing ---------------------------------------------------------
+
+// How many symbols `n` payload bytes become.
+fn alpha_symbols(a as i64, n as i64) as i64 {
+    let is i64 as b = alpha_bits(a);
+    return (n * 8 + b - 1) / b;
+}
+
+// The character that marks a base32 code.
+//
+// Three of the four alphabets tell you which they are just by being
+// themselves: ASCII, and two disjoint Unicode blocks. Base32 cannot, because
+// A-Z and 2-7 are all legal Base64URL — a base64 code that happened to avoid
+// lowercase would decode as base32 and produce a different URL, silently. So
+// base32 codes carry one leading character that Base64URL does not contain.
+//
+// One character is the honest price of a fourth alphabet. It is charged only
+// to the alphabet that needs it, and only because the alternative is a marker
+// inside the payload, which would charge every link for a distinction three of
+// them do not need.
+let is i64 as B32_MARK with imut = 126;    // '~', legal unescaped in a fragment
+
+fn alpha_prefix(a as i64) as i64 {
+    if (a == ALPHA_B32) { return 1; }
+    return 0;
+}
+
+// An upper bound on the UTF-8 bytes those symbols occupy.
+fn alpha_size_bytes(a as i64, n as i64) as i64 {
+    let is i64 as syms = alpha_symbols(a, n);
+    if (a == ALPHA_EMOJI) { return syms * 4; }
+    if (a == ALPHA_CJK)   { return syms * 3; }
+    return syms + alpha_prefix(a);
+}
+
+// Payload bytes into text. Returns the number of UTF-8 bytes written.
+//
+// The trailing symbol carries whatever bits are left over, padded with zeros.
+// For alphabets whose width does not divide eight the decoder can recover one
+// byte more than went in, and those bytes are zeros — which the range decoder
+// reads off the end of its buffer by design, so nothing downstream can tell.
+fn alpha_encode(a as i64, src as *u8, n as i64, out as *u8, max as i64) as i64 {
+    if (alpha_size_bytes(a, n) > max) { return errno.E_SPACE; }
+    let is i64 as bits = alpha_bits(a);
+    let is i64 as mask = (1 << bits) - 1;
+
+    let is i64 as acc   with mut = 0;
+    let is i64 as nb    with mut = 0;
+    let is i64 as w     with mut = 0;
+    if (alpha_prefix(a) == 1) { out[0] = cast(u8, B32_MARK); w = 1; }
+    let is i64 as i     with mut = 0;
+    while (i < n) {
+        acc = (acc << 8) | cast(i64, src[i]);
+        nb = nb + 8;
+        while (nb >= bits) {
+            w = w + _put_cp(out, w, alpha_cp(a, (acc >> (nb - bits)) & mask));
+            nb = nb - bits;
+        }
+        i = i + 1;
+    }
+    if (nb > 0) {
+        w = w + _put_cp(out, w, alpha_cp(a, (acc << (bits - nb)) & mask));
+    }
+    return w;
+}
+
+// Text back into payload bytes. Returns bytes written, or a negative error.
+fn alpha_decode(a as i64, src as *u8, n as i64, out as *u8, max as i64) as i64 {
+    let is i64 as bits = alpha_bits(a);
+    let is i64 as acc  with mut = 0;
+    let is i64 as nb   with mut = 0;
+    let is i64 as w    with mut = 0;
+    let is i64 as i    with mut = 0;
+    let is [1]i64 as used;
+
+    // Skip the marker if this alphabet carries one. A base32 code without it
+    // is not a base32 code, so its absence is refused rather than assumed.
+    if (alpha_prefix(a) == 1) {
+        if (n < 1) { return errno.E_BADCHAR; }
+        if (cast(i64, src[0]) != B32_MARK) { return errno.E_BADCHAR; }
+        i = 1;
+    }
+
+    while (i < n) {
+        let is i64 as cp = _get_cp(src, i, n, cast(*i64, &used));
+        if (cp < 0) { return errno.E_BADCHAR; }
+        i = i + used[0];
+
+        let is i64 as v = alpha_val(a, cp);
+        if (v < 0) { return errno.E_BADCHAR; }
+
+        acc = (acc << bits) | v;
+        nb = nb + bits;
+        while (nb >= 8) {
+            if (w >= max) { return errno.E_SPACE; }
+            out[w] = cast(u8, (acc >> (nb - 8)) & 0xFF);
+            w = w + 1;
+            nb = nb - 8;
+        }
+    }
+    return w;
+}
+
+// Which alphabet a code is written in, or -1 when it is in none of them.
+//
+// Three of them are disjoint by construction — ASCII against two disjoint
+// Unicode blocks — so the characters already say which alphabet they are and
+// no marker inside the payload is needed. The fourth is not disjoint from
+// Base64URL at all, which is exactly why it carries a leading '~'.
+fn alpha_detect(src as *u8, n as i64) as i64 {
+    if (n <= 0) { return 0 - 1; }
+    if (cast(i64, src[0]) == B32_MARK) { return ALPHA_B32; }
+
+    let is i64 as i with mut = 0;
+    let is [1]i64 as used;
+    let is i64 as ascii_only with mut = 1;
+    let is i64 as all_cjk    with mut = 1;
+    let is i64 as all_emoji  with mut = 1;
+
+    while (i < n) {
+        let is i64 as cp = _get_cp(src, i, n, cast(*i64, &used));
+        if (cp < 0) { return 0 - 1; }
+        i = i + used[0];
+        if (alpha_val(ALPHA_B64, cp) < 0)   { ascii_only = 0; }
+        if (alpha_val(ALPHA_CJK, cp) < 0)   { all_cjk = 0; }
+        if (alpha_val(ALPHA_EMOJI, cp) < 0) { all_emoji = 0; }
+    }
+    if (ascii_only == 1) { return ALPHA_B64; }
+    if (all_cjk == 1)    { return ALPHA_CJK; }
+    if (all_emoji == 1)  { return ALPHA_EMOJI; }
+    return 0 - 1;
+}

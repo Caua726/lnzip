@@ -179,7 +179,7 @@ fn main(argc as i64, argv as *u8) as i32 {
     fail = fail + cast(i64, run_case(ccp, "test_codec", "tests/test_codec.cst"));
 
     // ── the output alphabets ──────────────────────────────────────
-    fail = fail + cast(i64, run_case(ccp, "test_fmt",   "tests/test_fmt.cst"));
+    fail = fail + cast(i64, run_case(ccp, "test_alpha", "tests/test_alpha.cst"));
 
     if (fail == 0) { io.write_str(1, "all green\n"); return 0; }
     io.write_str(1, "FAILURES: "); io.write_int(1, fail); io.write_str(1, "\n");
