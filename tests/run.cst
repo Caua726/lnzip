@@ -175,6 +175,7 @@ fn main(argc as i64, argv as *u8) as i32 {
     fail = fail + cast(i64, run_case(ccp, "test_rc",    "tests/test_rc.cst"));
 
     // ── the model file and the codec on top of it ─────────────────
+    fail = fail + cast(i64, run_case(ccp, "test_dict",  "tests/test_dict.cst"));
     fail = fail + cast(i64, run_case(ccp, "test_codec", "tests/test_codec.cst"));
 
     // ── the output alphabets ──────────────────────────────────────

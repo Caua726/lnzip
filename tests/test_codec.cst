@@ -133,7 +133,7 @@ fn main() as i32 {
     while (pass < 40) {          // repeat so the counts dominate the prior
         i = 0;
         while (i < NCASE) {
-            codec.lnz_count(sample(i), sample_len(i), cnt.n0, cnt.n1);
+            codec.lnz_count(sample(i), sample_len(i), &bi, cnt.n0, cnt.n1);
             i = i + 1;
         }
         pass = pass + 1;
@@ -143,7 +143,12 @@ fn main() as i32 {
     let is *u16 as probs = cast(*u16, praw);
     counting.counts_to_probs(&cnt, probs);
 
-    if (model.model_write(MODEL_PATH, 3, model.TIER_TINY, probs) < 0) { return 32; }
+    // No dictionaries: every offset equal, so model_write emits no dictionary
+    // sections at all and the model is one that spells every token out.
+    let is [5]i64 as dofs;
+    dofs[0] = 0; dofs[1] = 0; dofs[2] = 0; dofs[3] = 0; dofs[4] = 0;
+    if (model.model_write(MODEL_PATH, 3, model.TIER_TINY, probs,
+                          cast(*u8, &dofs), cast(*i64, &dofs)) < 0) { return 32; }
 
     let is model.Model as tr with mut;
     if (model.model_open(&tr, MODEL_PATH) != 0) { return 33; }

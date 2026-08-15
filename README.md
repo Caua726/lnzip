@@ -70,23 +70,40 @@ The benchmark reports per category rather than hiding this in an average.
 
 ## Where it stands
 
-The envelope, the coder and the character model are in. The structural
-grammar — domains, path tokens, typed fields — is not, so what follows is the
-floor rather than the result.
+The structural grammar is in: components, and token dictionaries for hosts,
+path segments, query keys and query values. Percent-encoded content is not yet
+unpacked, and that is the next measured win.
 
 Measured on 14487 URLs held out of training (real browser history), each
 compressed on its own:
 
-| | total | of original | mean/URL |
-|---|---|---|---|
-| **lnzip** — order-2 character model, Tiny | 473469 | **64.5%** | 157.8 B |
-| brotli q11 — its static dictionary already holds URL fragments | 535185 | 72.9% | 178.4 B |
-| gzip -9 | 564381 | 76.9% | 188.1 B |
-| bzip2 -9 | 709828 | 96.7% | 236.6 B |
+| | of original | mean/URL |
+|---|---|---|
+| **lnzip** — structural, Tiny | **43.4%** | 67 B |
+| brotli q11 — its dictionary already holds URL fragments | 72.9% | 178 B |
+| gzip -9 | 76.9% | 188 B |
+| bzip2 -9 | 96.7% | 237 B |
 
-That lead comes from one decision: the probabilities live in the model, not in
-the payload. A general compressor has to ship its own statistics with every
-sixty-byte string, and there is no room.
+Getting there in order, so the cost of each idea is visible:
+
+| | of original |
+|---|---|
+| order-2 character model | 57.8% |
+| + components coded separately | 57.3% |
+| + token dictionaries | 43.4% |
+
+Components on their own bought almost nothing, which was worth learning: at the
+character level the model already knew most of what a component boundary would
+have told it. The dictionaries bought a quarter, because a third of a URL is
+tokens that a few thousand entries account for completely — 4096 host entries
+cover 98.8% of host bytes.
+
+What is left is mostly not compressible, and the measurement says so plainly.
+59% of all bytes sit in the query string. Of the query values no dictionary
+reaches, 44% are opaque base64-ish identifiers — randomness by construction,
+and no model removes randomness. The other 42% are percent-encoded, three
+characters per byte and often an entire URL hiding inside a parameter, which is
+where the next real win is rather than in more context.
 
 Losslessness is gated on a corpus rather than on chosen examples — 144874 real
 URLs, every one round-tripping byte for byte, run again on every change:
@@ -95,10 +112,10 @@ URLs, every one round-tripping byte for byte, run again on every change:
 caustic-mk build corpus && ./build/corpus <file-of-urls> [model.lnzm]
 ```
 
-Training is byte-reproducible: same corpus, same trainer, same model. It has
-to be, because a published model id is frozen forever — a link minted today
-has to resolve in ten years. Nothing is published yet, and the format is still
-free to move.
+Training is byte-reproducible: same corpus, same trainer, same model. It has to
+be, because a published model id is frozen forever — a link minted today has to
+resolve in ten years. Nothing is published yet, and the format is still free to
+move.
 
 See `docs/design.md` for the phases and their gates.
 

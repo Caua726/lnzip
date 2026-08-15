@@ -1,0 +1,146 @@
+// =======================================================
+// model/dict.cst — a frequency-ranked token dictionary.
+//
+// Four of these live in a model: host labels, path segments, query keys and
+// query values. They exist because of a measurement rather than a hunch. On a
+// corpus of real browsing, a 4096-entry host dictionary covers 98.8% of host
+// bytes and a 1024-entry key dictionary covers 94.8% of query-key bytes — a
+// third of every URL is tokens that a few thousand entries account for
+// completely, and coding them character by character spends thirty bits to say
+// something worth four.
+//
+// TOKENS ARE ORDERED BY FREQUENCY, NOT ALPHABETICALLY. The rank is what gets
+// coded, through a bit-length bucket, so a common token costs a couple of bits
+// and a rare one costs about 2*log2(rank). That matches how token frequency
+// actually falls off, and it is why the dictionary can be large without the
+// tail costing anything to the head.
+//
+// The encoder needs string→rank and the decoder needs rank→string, which want
+// opposite orderings. Rather than store the tokens twice, the blob is in rank
+// order and a second index lists the ranks sorted lexicographically, so the
+// encoder binary-searches that. Twelve probes for four thousand entries.
+//
+// SERIALISED LAYOUT, all little-endian, four-byte aligned:
+//
+//   u32 count
+//   u32 blob_len
+//   u32 off[count + 1]     byte offsets into blob, in rank order
+//   u32 lex[count]         ranks, ordered by the bytes they name
+//   u8  blob[blob_len]
+// =======================================================
+
+use "../core/errno.cst" as errno;
+
+struct Dict {
+    count as i64;
+    off   as *u32;
+    lex   as *u32;
+    blob  as *u8;
+}
+
+fn dict_empty(d as *Dict) as void {
+    d.count = 0;
+    d.off  = cast(*u32, 0);
+    d.lex  = cast(*u32, 0);
+    d.blob = cast(*u8, 0);
+}
+
+// Header size for a dictionary of `count` entries, before the blob.
+fn dict_head_size(count as i64) as i64 {
+    return 8 + (count + 1) * 4 + count * 4;
+}
+
+// Point a Dict at bytes inside an already-loaded model. Every offset is
+// checked against the section it came from before anything reads through it:
+// these numbers arrive from disk, and in the browser build they arrive inside
+// a page anyone can hand anyone.
+fn dict_attach(d as *Dict, base as *u8, len as i64) as i64 {
+    dict_empty(d);
+    if (len < 8) { return errno.E_BADMODEL; }
+
+    let is *u32 as w = cast(*u32, base);
+    let is i64 as count    = cast(i64, w[0]);
+    let is i64 as blob_len = cast(i64, w[1]);
+    if (count < 0)     { return errno.E_BADMODEL; }
+    if (count > 262144){ return errno.E_BADMODEL; }
+    if (blob_len < 0)  { return errno.E_BADMODEL; }
+
+    let is i64 as head = dict_head_size(count);
+    if (head + blob_len != len) { return errno.E_BADMODEL; }
+
+    d.count = count;
+    d.off  = cast(*u32, cast(i64, base) + 8);
+    d.lex  = cast(*u32, cast(i64, base) + 8 + (count + 1) * 4);
+    d.blob = cast(*u8,  cast(i64, base) + head);
+
+    // The offset table must be non-decreasing and end exactly at blob_len,
+    // which is what makes every dict_get below need no bounds test of its own.
+    let is i64 as prev with mut = 0;
+    if (cast(i64, d.off[0]) != 0) { return errno.E_BADMODEL; }
+    let is i64 as i with mut = 1;
+    while (i <= count) {
+        let is i64 as v = cast(i64, d.off[i]);
+        if (v < prev)     { return errno.E_BADMODEL; }
+        if (v > blob_len) { return errno.E_BADMODEL; }
+        prev = v;
+        i = i + 1;
+    }
+    if (prev != blob_len) { return errno.E_BADMODEL; }
+
+    // Every lex entry must name a real rank. A bad one would send the
+    // encoder's binary search reading outside the blob.
+    i = 0;
+    while (i < count) {
+        if (cast(i64, d.lex[i]) >= count) { return errno.E_BADMODEL; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn dict_get(d as *Dict, rank as i64, out_len as *i64) as *u8 {
+    if (rank < 0 || rank >= d.count) { out_len[0] = 0; return cast(*u8, 0); }
+    let is i64 as a = cast(i64, d.off[rank]);
+    let is i64 as b = cast(i64, d.off[rank + 1]);
+    out_len[0] = b - a;
+    return cast(*u8, cast(i64, d.blob) + a);
+}
+
+// Byte-wise ordering: shorter is smaller when one is a prefix of the other.
+// The trainer sorts with the identical rule, and the two must not drift — a
+// disagreement would make the search miss tokens that are present, which
+// costs ratio silently and never fails a test.
+fn dict_cmp(a as *u8, alen as i64, b as *u8, blen as i64) as i64 {
+    let is i64 as n with mut = alen;
+    if (blen < n) { n = blen; }
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as x = cast(i64, a[i]);
+        let is i64 as y = cast(i64, b[i]);
+        if (x < y) { return 0 - 1; }
+        if (x > y) { return 1; }
+        i = i + 1;
+    }
+    if (alen < blen) { return 0 - 1; }
+    if (alen > blen) { return 1; }
+    return 0;
+}
+
+// The rank of a token, or -1. Binary search over the lexicographic index.
+fn dict_rank(d as *Dict, s as *u8, off as i64, len as i64) as i64 {
+    if (d.count == 0) { return 0 - 1; }
+    let is *u8 as key = cast(*u8, cast(i64, s) + off);
+
+    let is i64 as lo with mut = 0;
+    let is i64 as hi with mut = d.count - 1;
+    while (lo <= hi) {
+        let is i64 as mid = lo + ((hi - lo) / 2);
+        let is i64 as rank = cast(i64, d.lex[mid]);
+        let is [1]i64 as tl;
+        let is *u8 as tok = dict_get(d, rank, cast(*i64, &tl));
+        let is i64 as c = dict_cmp(tok, tl[0], key, len);
+        if (c == 0) { return rank; }
+        if (c < 0)  { lo = mid + 1; }
+        else        { hi = mid - 1; }
+    }
+    return 0 - 1;
+}

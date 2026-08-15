@@ -189,6 +189,15 @@ button.ghost:hover { color: var(--amber); border-color: var(--amber); background
   max-width: 100%;
 }
 .actions { display: flex; gap: 0.6rem; margin-top: 1.5rem; flex-wrap: wrap; }
+.section { margin-top: 4rem; padding-top: 2.5rem; border-top: 1px solid var(--hair); }
+.hint { font-size: 0.85rem; color: var(--slate); margin: 0.9rem 0 0; max-width: 54ch; }
+.dest {
+  font-family: var(--mono);
+  font-size: clamp(0.95rem, 2.2vw, 1.2rem);
+  color: var(--amber);
+  word-break: break-all;
+  margin: 0;
+}
 
 .note {
   font-size: 0.85rem; color: var(--slate);
@@ -248,7 +257,9 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
       <h1>The link <em>is</em> the URL, compressed.</h1>
       <p class="lede">No database, no account, no record of where anyone went.
         The part after the <strong>#</strong> is never sent to a server — this
-        page decompresses it in your browser and sends you on.</p>
+        page decompresses it in your browser and sends you on. Compress a URL
+        below, or expand somebody else&rsquo;s link to read where it goes before
+        you follow it.</p>
     </header>
   </div>
 
@@ -286,6 +297,31 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
   <div class="grid">
     <div class="gutter" aria-hidden="true"></div>
     <div id="err" class="error" hidden></div>
+  </div>
+
+  <div class="grid section">
+    <div class="gutter" id="gExp" aria-hidden="true"></div>
+    <form id="expandForm">
+      <label class="field" for="incode">Link to expand</label>
+      <div class="row">
+        <input id="incode" type="text" spellcheck="false" autocomplete="off"
+               placeholder="a code, or a whole lnzip link">
+        <button type="submit">Expand</button>
+      </div>
+      <p class="hint">Paste a link here to read where it goes before you open
+        it. Nothing is looked up and nothing is sent anywhere — the answer is
+        already inside the code.</p>
+      <div id="expandOut" hidden>
+        <p class="base">Points to</p>
+        <p class="dest" id="dest"></p>
+        <div class="actions">
+          <button type="button" id="go">Open it</button>
+          <button type="button" class="ghost" id="copyDest">Copy address</button>
+        </div>
+        <p class="note" id="destNote" hidden></p>
+      </div>
+      <div id="expandErr" class="error" hidden></div>
+    </form>
   </div>
 
   <div class="grid">
@@ -473,6 +509,60 @@ const WASM_B64 = "";
     });
 
     $('open').addEventListener('click', () => { if (link) location.href = link; });
+
+    // ---- expanding, the other direction --------------------------
+    //
+    // The same decode the resolver runs, stopping before the navigation. This
+    // is the only way to read a shortened link without visiting it, and with
+    // no database behind lnzip it is also the only way anyone could.
+    let dest = '';
+    const expandErr = $('expandErr');
+
+    function expand() {
+      const raw = $('incode').value.trim();
+      $('expandOut').hidden = true;
+      expandErr.hidden = true;
+      if (!raw) return;
+
+      // Accept a bare code or a whole link; the fragment is the code either way.
+      const hash = raw.indexOf('#');
+      let code = hash >= 0 ? raw.slice(hash + 1) : raw;
+      try { code = decodeURIComponent(code); } catch (e) { /* leave it as typed */ }
+
+      let out;
+      try {
+        out = lz.decode(code, { unicode: globalThis.lnzip.isUnicodeCode(code) });
+      } catch (e) {
+        expandErr.hidden = false;
+        expandErr.textContent = e.message;
+        return;
+      }
+
+      dest = out.url;
+      $('dest').textContent = dest;
+      $('gExp').innerHTML = '<b>' + new TextEncoder().encode(dest).length + '</b><span>bytes out</span>';
+      $('go').hidden = !out.safe;
+      const note = $('destNote');
+      note.hidden = out.safe;
+      if (!out.safe) {
+        note.textContent = 'This is not an http or https address, so lnzip will ' +
+          'not open it for you. It is shown above exactly as it decoded.';
+      }
+      $('expandOut').hidden = false;
+    }
+
+    $('expandForm').addEventListener('submit', (e) => { e.preventDefault(); expand(); });
+    $('go').addEventListener('click', () => { if (dest) location.href = dest; });
+    $('copyDest').addEventListener('click', async () => {
+      const btn = $('copyDest');
+      try {
+        await navigator.clipboard.writeText(dest);
+        btn.textContent = 'Copied';
+      } catch (e) {
+        btn.textContent = 'Copy failed';
+      }
+      setTimeout(() => { btn.textContent = 'Copy address'; }, 1400);
+    });
   }
 
   // A fragment change does not reload a page. Without this, pasting a code

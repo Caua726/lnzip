@@ -1,0 +1,122 @@
+// =======================================================
+// tests/test_dict.cst — the dictionary, built and read back.
+//
+// dict_attach is a validator for numbers that arrive from a file, and every
+// one of them indexes something. An offset table that is not monotonic, a lex
+// entry naming a rank that does not exist, a length that disagrees with the
+// section — each of those sends a read outside the blob, and in the browser
+// build the blob is inside a page anyone can hand anyone. So the malformed
+// cases are tested as carefully as the well-formed one.
+//
+// The other half is the property the encoder depends on and no error can
+// reveal: a token that was kept must be findable. dict_rank missing a token
+// that is present costs ratio and fails nothing, so it is checked directly,
+// for every token, against the ordering the trainer used.
+//
+// Exit code is which check failed.
+// =======================================================
+
+use "../model/dict.cst"   as dict;
+use "../train/tokens.cst" as tok;
+use "../core/errno.cst"   as errno;
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/io.cst" as io;
+
+let is i64 as NTOK with imut = 12;
+
+fn word(i as i64) as *u8 {
+    if (i ==  0) { return "com"; }
+    if (i ==  1) { return "www"; }
+    if (i ==  2) { return "github"; }
+    if (i ==  3) { return "utm_source"; }
+    if (i ==  4) { return ""; }              // the empty token is a real one
+    if (i ==  5) { return "issues"; }
+    if (i ==  6) { return "a"; }
+    if (i ==  7) { return "ab"; }            // a prefix pair, where cmp order matters
+    if (i ==  8) { return "abc"; }
+    if (i ==  9) { return "\xff\xfe"; }      // high bytes must order as unsigned
+    if (i == 10) { return "\x7f"; }
+    return "zzzzzzzzzzzzzzzzzzzz";
+}
+fn wlen(i as i64) as i64 {
+    if (i == 4) { return 0; }
+    if (i == 9) { return 2; }
+    if (i == 10) { return 1; }
+    let is *u8 as s = word(i);
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+
+fn main() as i32 {
+    let is tok.TokSet as t with mut;
+    if (tok.tokset_new(&t, 1024, 65536) != 0) { return 1; }
+
+    // Frequencies deliberately distinct and reversed against insertion order,
+    // so a dictionary that came out in the wrong order would be visible.
+    let is i64 as i with mut = 0;
+    while (i < NTOK) {
+        let is i64 as reps with mut = NTOK - i;
+        while (reps > 0) {
+            tok.tokset_add(&t, word(i), 0, wlen(i));
+            reps = reps - 1;
+        }
+        i = i + 1;
+    }
+    if (t.used != NTOK) { return 2; }
+
+    let is cb.Bytes as blob with mut = cb.bytes_new(4096);
+    let is i64 as n = tok.tokset_emit(&t, NTOK, &blob);
+    if (n < 0)          { return 3; }
+    if (n != blob.len)  { return 4; }
+
+    let is dict.Dict as d with mut;
+    if (dict.dict_attach(&d, blob.ptr, blob.len) != 0) { return 5; }
+    if (d.count != NTOK) { return 6; }
+
+    // Every token is findable, and comes back byte-identical at its rank.
+    i = 0;
+    while (i < NTOK) {
+        let is i64 as r = dict.dict_rank(&d, word(i), 0, wlen(i));
+        if (r < 0)        { return 10; }
+        if (r >= NTOK)    { return 11; }
+        let is [1]i64 as tl;
+        let is *u8 as got = dict.dict_get(&d, r, cast(*i64, &tl));
+        if (tl[0] != wlen(i)) { return 12; }
+        let is i64 as j with mut = 0;
+        while (j < tl[0]) {
+            if (got[j] != word(i)[j]) { return 13; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // Frequency order: the token inserted most often is rank 0.
+    if (dict.dict_rank(&d, word(0), 0, wlen(0)) != 0) { return 14; }
+
+    // A token that was never counted is absent rather than some near miss.
+    if (dict.dict_rank(&d, "notpresent", 0, 10) >= 0) { return 15; }
+    if (dict.dict_rank(&d, "githu", 0, 5) >= 0)       { return 16; }
+    if (dict.dict_rank(&d, "githubx", 0, 7) >= 0)     { return 17; }
+
+    // Ranks outside the table give nothing rather than reading past the blob.
+    let is [1]i64 as zl;
+    if (cast(i64, dict.dict_get(&d, NTOK, cast(*i64, &zl))) != 0) { return 18; }
+    if (cast(i64, dict.dict_get(&d, 0 - 1, cast(*i64, &zl))) != 0) { return 19; }
+
+    // ── malformed dictionaries are refused ────────────────────────
+    let is dict.Dict as bad with mut;
+    if (dict.dict_attach(&bad, blob.ptr, 4) != errno.E_BADMODEL)  { return 20; }
+    if (dict.dict_attach(&bad, blob.ptr, blob.len - 1) != errno.E_BADMODEL) { return 21; }
+    if (dict.dict_attach(&bad, blob.ptr, blob.len + 1) != errno.E_BADMODEL) { return 22; }
+
+    // A non-monotonic offset table: off[2] pushed past the end.
+    blob.ptr[8 + 8] = cast(u8, 0xFF);
+    blob.ptr[8 + 9] = cast(u8, 0xFF);
+    if (dict.dict_attach(&bad, blob.ptr, blob.len) != errno.E_BADMODEL) { return 23; }
+
+    tok.tokset_free(&t);
+    cb.bytes_free(&blob);
+    io.write_str(io.STDOUT, "dict: 12 tokens ranked, found, and malformed blobs refused\n");
+    return 0;
+}

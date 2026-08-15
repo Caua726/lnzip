@@ -31,6 +31,7 @@
 
 use "../core/errno.cst" as errno;
 use "./ctx.cst"         as ctx;
+use "./dict.cst"        as dict;
 use "../entropy/rc.cst" as rc;
 use "std/io.cst"        as io;
 use "std/mem.cst" only bins, core as mem;
@@ -48,6 +49,12 @@ let is i64 as MAX_MODEL_ID with imut = 7;
 
 let is i64 as SEC_PROBS with imut = 1;
 
+// One section per dictionary, in DICT_* order. A model with none of them still
+// parses and still works — every token simply misses and is spelled out — so
+// the built-in uniform model and anything trained before dictionaries existed
+// remain loadable.
+let is i64 as SEC_DICT0 with imut = 16;
+
 let is i64 as HDR_SIZE with imut = 32;
 let is i64 as SEC_SIZE with imut = 24;
 
@@ -62,6 +69,20 @@ struct Model {
 
     probs  as *u16;
     nprobs as i64;
+
+    // Four, named rather than an array so the accessor below cannot be handed
+    // an index the type system did not check.
+    dhost as dict.Dict;
+    dpath as dict.Dict;
+    dkey  as dict.Dict;
+    dval  as dict.Dict;
+}
+
+fn model_dict(m as *Model, id as i64) as *dict.Dict {
+    if (id == ctx.DICT_HOST) { return &m.dhost; }
+    if (id == ctx.DICT_PATH) { return &m.dpath; }
+    if (id == ctx.DICT_KEY)  { return &m.dkey; }
+    return &m.dval;
 }
 
 // Little-endian readers that assume nothing about alignment. The section table
@@ -176,6 +197,22 @@ fn _parse(m as *Model) as i64 {
 
     m.probs  = cast(*u16, cast(i64, m.base) + poff[0]);
     m.nprobs = ctx.NPROBS;
+
+    // Dictionaries are optional. A missing section leaves that dictionary
+    // empty, which is a working model that spells every token out.
+    let is i64 as k with mut = 0;
+    while (k < ctx.NDICT) {
+        let is *dict.Dict as d = model_dict(m, k);
+        dict.dict_empty(d);
+        let is [1]i64 as doff;
+        let is [1]i64 as dlen;
+        if (_find_section(m, SEC_DICT0 + k, cast(*i64, &doff), cast(*i64, &dlen)) == 0) {
+            let is i64 as dr = dict.dict_attach(d,
+                cast(*u8, cast(i64, m.base) + doff[0]), dlen[0]);
+            if (dr != 0) { return dr; }
+        }
+        k = k + 1;
+    }
     return 0;
 }
 
@@ -255,6 +292,8 @@ fn model_builtin(m as *Model) as i64 {
     m.tier = TIER_TINY;
     m.probs = p;
     m.nprobs = ctx.NPROBS;
+    let is i64 as k with mut = 0;
+    while (k < ctx.NDICT) { dict.dict_empty(model_dict(m, k)); k = k + 1; }
     return 0;
 }
 
@@ -272,13 +311,29 @@ fn model_free(m as *Model) as void {
 // write_file_atomic — a half-written model that still parses is exactly the
 // failure the content hash exists to catch, and there is no reason to create
 // the opportunity.
-fn model_write(path as *u8, model_id as i64, tier as i64, probs as *u16) as i64 {
+// `dblob` holds the four serialised dictionaries back to back and `dofs` is
+// five offsets into it: dictionary k occupies [dofs[k], dofs[k+1]). Passing
+// them this way rather than as four pointers keeps the caller's bookkeeping in
+// one place, which is where the ordering has to be right.
+fn model_write(path as *u8, model_id as i64, tier as i64, probs as *u16,
+               dblob as *u8, dofs as *i64) as i64 {
     if (model_id < 0)            { return errno.E_BADMODEL; }
     if (model_id > MAX_MODEL_ID) { return errno.E_BADMODEL; }
 
-    let is i64 as poff = HDR_SIZE + SEC_SIZE;          // one section
+    // Only non-empty dictionaries get a section. A zero-length one would
+    // parse as a section that exists and then fail to validate, which is a
+    // worse answer than the absence _parse already tolerates.
+    let is i64 as ndict with mut = 0;
+    let is i64 as j with mut = 0;
+    while (j < ctx.NDICT) {
+        if (dofs[j + 1] > dofs[j]) { ndict = ndict + 1; }
+        j = j + 1;
+    }
+    let is i64 as nsec = 1 + ndict;
+    let is i64 as poff = HDR_SIZE + nsec * SEC_SIZE;
     let is i64 as plen = ctx.NPROBS * 2;
-    let is i64 as size = poff + plen;
+    let is i64 as dtotal = dofs[ctx.NDICT];
+    let is i64 as size = poff + plen + dtotal;
 
     let is *u8 as f = mem.core.mmap_anon(size);
     if (cast(i64, f) <= 0) { return errno.E_OOM; }
@@ -288,7 +343,7 @@ fn model_write(path as *u8, model_id as i64, tier as i64, probs as *u16) as i64 
     _wr16(f, 6, model_id);
     f[8] = cast(u8, tier);
     f[9] = cast(u8, 0); f[10] = cast(u8, 0); f[11] = cast(u8, 0);
-    _wr32(f, 12, 1);
+    _wr32(f, 12, nsec);
     _wr64(f, 16, 0);                                    // hash, filled in below
     _wr64(f, 24, 0);
 
@@ -296,6 +351,21 @@ fn model_write(path as *u8, model_id as i64, tier as i64, probs as *u16) as i64 
     _wr32(f, HDR_SIZE + 4, 0);
     _wr64(f, HDR_SIZE + 8, poff);
     _wr64(f, HDR_SIZE + 16, plen);
+
+    let is i64 as k with mut = 0;
+    let is i64 as slot with mut = 0;
+    while (k < ctx.NDICT) {
+        if (dofs[k + 1] > dofs[k]) {
+            let is i64 as at = HDR_SIZE + (1 + slot) * SEC_SIZE;
+            _wr32(f, at, SEC_DICT0 + k);
+            _wr32(f, at + 4, 0);
+            _wr64(f, at + 8, poff + plen + dofs[k]);
+            _wr64(f, at + 16, dofs[k + 1] - dofs[k]);
+            slot = slot + 1;
+        }
+        k = k + 1;
+    }
+    mem.core.memcpy(cast(*u8, cast(i64, f) + poff + plen), dblob, dtotal);
 
     // The probabilities go out clamped. The coder clamps too, so this changes
     // no output — but it means the file on disk says what the codec will

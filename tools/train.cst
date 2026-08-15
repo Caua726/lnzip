@@ -4,28 +4,69 @@
 //   caustic-mk build train
 //   ./build/train <corpus> <out.lnzm> [model_id] [tier]
 //
-// One URL per line. Streams the file in fixed chunks rather than reading it
-// whole: the corpus this will eventually be pointed at is measured in
-// gigabytes and the machine it runs on has six of them free, so "read the
-// input into memory" is a habit that has to be broken before it is convenient
-// rather than after.
+// One URL per line. Two passes, because the second depends on the first: the
+// dictionaries have to exist before the probability counts can know whether a
+// token will be coded as a rank or spelled out.
 //
-// Memory here is the two count arrays and nothing else — eight megabytes,
-// independent of corpus size.
+//   pass 1  count every token, keep the most frequent, build four dictionaries
+//   pass 2  walk the grammar with those dictionaries in place and count bits
+//
+// Neither pass reads the corpus into memory. The file is streamed in fixed
+// chunks, because the corpus this will eventually be pointed at is measured in
+// gigabytes and the machine it runs on has six of them free — "read the input
+// into memory" is a habit worth breaking before it is convenient rather than
+// after.
+//
+// The tokenisation itself is not here. It lives in codec/codec.cst, next to
+// the encoder, and the trainer receives it through a callback: a trainer that
+// tokenised even slightly differently would build dictionaries the encoder
+// then misses, and nothing would fail — the ratio would simply be worse, for a
+// reason no test could localise.
 // =======================================================
 
 use "../core/errno.cst"  as errno;
 use "../model/ctx.cst"   as ctx;
 use "../model/fmt.cst"   as model;
+use "../model/dict.cst"  as dict;
 use "../codec/codec.cst" as codec;
 use "../train/count.cst" as counting;
+use "../train/tokens.cst" as tok;
 use "../url/split.cst"   as us;
+use "caustic-compact/core/bytes.cst" as cb;
 use "std/io.cst"         as io;
 use "std/env.cst"        as env;
 use "std/mem.cst" only bins, core as mem;
 
 let is i64 as CHUNK with imut = 1048576;
 let is i64 as _NL   with imut = 10;
+
+// How many entries each dictionary keeps. Chosen from coverage measured on a
+// held-out corpus: at these sizes a host dictionary accounts for 98.8% of host
+// bytes and a key dictionary for 94.8% of query-key bytes, while path segments
+// reach 37.9% and query values 22.7%. Past these the tail is long and flat,
+// and every entry still costs space in a file a browser has to download.
+let is i64 as N_HOST with imut = 4096;
+let is i64 as N_PATH with imut = 8192;
+let is i64 as N_KEY  with imut = 1024;
+let is i64 as N_VAL  with imut = 4096;
+
+let is i64 as TAB_SLOTS with imut = 1048576;    // 2^20
+let is i64 as TAB_ARENA with imut = 33554432;   // 32 MB of token bytes
+
+struct Sets {
+    h as tok.TokSet;
+    p as tok.TokSet;
+    k as tok.TokSet;
+    v as tok.TokSet;
+}
+
+fn _sink(c as *u8, dictid as i64, src as *u8, off as i64, len as i64) as void {
+    let is *Sets as s = cast(*Sets, c);
+    if (dictid == ctx.DICT_HOST) { tok.tokset_add(&s.h, src, off, len); return; }
+    if (dictid == ctx.DICT_PATH) { tok.tokset_add(&s.p, src, off, len); return; }
+    if (dictid == ctx.DICT_KEY)  { tok.tokset_add(&s.k, src, off, len); return; }
+    tok.tokset_add(&s.v, src, off, len);
+}
 
 fn parse_int(s as *u8) as i64 {
     let is i64 as v with mut = 0;
@@ -38,6 +79,75 @@ fn parse_int(s as *u8) as i64 {
     }
     if (i == 0) { return 0 - 1; }
     return v;
+}
+
+// One streaming pass over the corpus. `phase` 0 collects tokens into `sets`;
+// phase 1 counts grammar statistics into `cnt`, using `m` for its
+// dictionaries. Returns the number of lines that were usable.
+fn _pass(path as *u8, phase as i64, sets as *Sets, m as *model.Model,
+         cnt as *counting.Counts, seen as *i64, toolong as *i64) as i64 {
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return errno.E_IO; }
+
+    let is *u8 as chunk = mem.core.mmap_anon(CHUNK);
+    let is *u8 as line  = mem.core.mmap_anon(us.MAX_URL + 2);
+    if (cast(i64, chunk) <= 0 || cast(i64, line) <= 0) { return errno.E_OOM; }
+
+    let is i64 as fill    with mut = 0;
+    let is i64 as spilled with mut = 0;
+    let is i64 as used    with mut = 0;
+
+    while (1 == 1) {
+        let is i64 as got = io._read_fd(fd, chunk, CHUNK);
+        if (got <= 0) { break; }
+        let is i64 as i with mut = 0;
+        while (i < got) {
+            let is i64 as b = cast(i64, chunk[i]);
+            if (b == _NL) {
+                if (fill > 0 || spilled == 1) { seen[0] = seen[0] + 1; }
+                if (spilled == 1) { toolong[0] = toolong[0] + 1; }
+                else {
+                    if (fill > 0) {
+                        if (phase == 0) {
+                            codec.lnz_walk_tokens(line, fill, fn_ptr(_sink), cast(*u8, sets));
+                            used = used + 1;
+                        } else {
+                            if (codec.lnz_count(line, fill, m, cnt.n0, cnt.n1) == 0) {
+                                used = used + 1;
+                            }
+                        }
+                    }
+                }
+                fill = 0;
+                spilled = 0;
+            } else {
+                if (fill < us.MAX_URL) { line[fill] = cast(u8, b); fill = fill + 1; }
+                else { spilled = 1; }
+            }
+            i = i + 1;
+        }
+    }
+    if (fill > 0 && spilled == 0) {
+        seen[0] = seen[0] + 1;
+        if (phase == 0) {
+            codec.lnz_walk_tokens(line, fill, fn_ptr(_sink), cast(*u8, sets));
+            used = used + 1;
+        } else {
+            if (codec.lnz_count(line, fill, m, cnt.n0, cnt.n1) == 0) { used = used + 1; }
+        }
+    }
+    io._close_fd(fd);
+    mem.core.munmap(chunk, CHUNK);
+    mem.core.munmap(line, us.MAX_URL + 2);
+    return used;
+}
+
+fn _report_dict(name as *u8, t as *tok.TokSet, kept as i64) as void {
+    io.write_str(io.STDOUT, "  ");     io.write_str(io.STDOUT, name);
+    io.write_str(io.STDOUT, " distinct "); io.write_int(io.STDOUT, t.used);
+    io.write_str(io.STDOUT, ", kept ");    io.write_int(io.STDOUT, kept);
+    if (t.full == 1) { io.write_str(io.STDOUT, "  (table filled — the tail was dropped)"); }
+    io.write_str(io.STDOUT, "\n");
 }
 
 fn main(argc as i64, argv as *u8) as i32 {
@@ -58,65 +168,82 @@ fn main(argc as i64, argv as *u8) as i32 {
         return 2;
     }
 
-    let is counting.Counts as c with mut;
-    if (counting.counts_new(&c) != 0) {
+    let is [1]i64 as seen;    seen[0] = 0;
+    let is [1]i64 as toolong; toolong[0] = 0;
+
+    // ── pass 1: what tokens exist, and how often ──────────────────
+    let is Sets as sets with mut;
+    if (tok.tokset_new(&sets.h, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+    if (tok.tokset_new(&sets.p, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+    if (tok.tokset_new(&sets.k, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+    if (tok.tokset_new(&sets.v, TAB_SLOTS, TAB_ARENA) != 0) { return 3; }
+
+    let is counting.Counts as cnt with mut;
+    let is model.Model as m with mut;
+
+    let is i64 as u1 = _pass(corpus, 0, &sets, &m, &cnt, cast(*i64, &seen), cast(*i64, &toolong));
+    if (u1 < 0) { io.write_str(io.STDERR, "cannot read corpus\n"); return 3; }
+
+    io.write_str(io.STDOUT, "train: pass 1, ");
+    io.write_int(io.STDOUT, u1); io.write_str(io.STDOUT, " urls tokenised\n");
+
+    // ── build the dictionaries ────────────────────────────────────
+    let is cb.Bytes as dblob with mut = cb.bytes_new(1048576);
+    let is [5]i64 as dofs;
+    dofs[0] = 0;
+    if (tok.tokset_emit(&sets.h, N_HOST, &dblob) < 0) { return 3; }
+    dofs[1] = dblob.len;
+    if (tok.tokset_emit(&sets.p, N_PATH, &dblob) < 0) { return 3; }
+    dofs[2] = dblob.len;
+    if (tok.tokset_emit(&sets.k, N_KEY, &dblob) < 0) { return 3; }
+    dofs[3] = dblob.len;
+    if (tok.tokset_emit(&sets.v, N_VAL, &dblob) < 0) { return 3; }
+    dofs[4] = dblob.len;
+
+    io.write_str(io.STDOUT, "train: dictionaries\n");
+    _report_dict("host ", &sets.h, N_HOST);
+    _report_dict("path ", &sets.p, N_PATH);
+    _report_dict("key  ", &sets.k, N_KEY);
+    _report_dict("value", &sets.v, N_VAL);
+
+    tok.tokset_free(&sets.h);
+    tok.tokset_free(&sets.p);
+    tok.tokset_free(&sets.k);
+    tok.tokset_free(&sets.v);
+
+    // A model carrying only the dictionaries. Pass 2 needs them to know which
+    // tokens will be ranks and which will be spelled out; it never touches the
+    // probabilities, which is what it is about to produce.
+    let is i64 as k with mut = 0;
+    while (k < ctx.NDICT) {
+        let is *dict.Dict as d = model.model_dict(&m, k);
+        let is i64 as dr = dict.dict_attach(d,
+            cast(*u8, cast(i64, dblob.ptr) + dofs[k]), dofs[k + 1] - dofs[k]);
+        if (dr != 0) {
+            io.write_str(io.STDERR, "dictionary did not validate: ");
+            io.write_str(io.STDERR, errno.err_name(dr));
+            io.write_str(io.STDERR, "\n");
+            return 3;
+        }
+        k = k + 1;
+    }
+
+    // ── pass 2: the bits those choices cost ───────────────────────
+    if (counting.counts_new(&cnt) != 0) {
         io.write_str(io.STDERR, "out of memory allocating counts\n");
         return 3;
     }
-
-    let is i64 as fd = io._open_read(corpus);
-    if (fd < 0) {
-        io.write_str(io.STDERR, "cannot open corpus\n");
-        return 3;
-    }
-
-    let is *u8 as chunk = mem.core.mmap_anon(CHUNK);
-    let is *u8 as line  = mem.core.mmap_anon(us.MAX_URL + 2);
-    if (cast(i64, chunk) <= 0 || cast(i64, line) <= 0) { return 3; }
-
-    let is i64 as fill    with mut = 0;   // bytes held in `line`
-    let is i64 as spilled with mut = 0;   // the current line already overflowed
-    let is i64 as seen    with mut = 0;
-    let is i64 as used    with mut = 0;
-    let is i64 as toolong with mut = 0;
-
-    while (1 == 1) {
-        let is i64 as got = io._read_fd(fd, chunk, CHUNK);
-        if (got <= 0) { break; }
-
-        let is i64 as i with mut = 0;
-        while (i < got) {
-            let is i64 as b = cast(i64, chunk[i]);
-            if (b == _NL) {
-                if (fill > 0 || spilled == 1) { seen = seen + 1; }
-                if (spilled == 1)      { toolong = toolong + 1; }
-                else {
-                    if (fill > 0) {
-                        if (codec.lnz_count(line, fill, c.n0, c.n1) == 0) { used = used + 1; }
-                    }
-                }
-                fill = 0;
-                spilled = 0;
-            } else {
-                if (fill < us.MAX_URL) { line[fill] = cast(u8, b); fill = fill + 1; }
-                else { spilled = 1; }
-            }
-            i = i + 1;
-        }
-    }
-    // A final line with no trailing newline is still a line.
-    if (fill > 0 && spilled == 0) {
-        seen = seen + 1;
-        if (codec.lnz_count(line, fill, c.n0, c.n1) == 0) { used = used + 1; }
-    }
-    io._close_fd(fd);
+    seen[0] = 0; toolong[0] = 0;
+    let is i64 as u2 = _pass(corpus, 1, &sets, &m, &cnt, cast(*i64, &seen), cast(*i64, &toolong));
+    if (u2 < 0) { return 3; }
 
     let is *u8 as praw = mem.core.mmap_anon(ctx.NPROBS * 2);
     if (cast(i64, praw) <= 0) { return 3; }
     let is *u16 as probs = cast(*u16, praw);
-    counting.counts_to_probs(&c, probs);
+    counting.counts_to_probs(&cnt, probs);
 
-    let is i64 as w = model.model_write(outpath, model_id, tier, probs);
+    let is i64 as w = model.model_write(outpath, model_id, tier, probs,
+                                        dblob.ptr, cast(*i64, &dofs));
     if (w < 0) {
         io.write_str(io.STDERR, "write failed: ");
         io.write_str(io.STDERR, errno.err_name(w));
@@ -124,14 +251,15 @@ fn main(argc as i64, argv as *u8) as i32 {
         return 4;
     }
 
-    io.write_str(io.STDOUT, "train: ");    io.write_int(io.STDOUT, seen);
-    io.write_str(io.STDOUT, " lines, ");   io.write_int(io.STDOUT, used);
-    io.write_str(io.STDOUT, " counted, "); io.write_int(io.STDOUT, toolong);
+    io.write_str(io.STDOUT, "train: ");    io.write_int(io.STDOUT, seen[0]);
+    io.write_str(io.STDOUT, " lines, ");   io.write_int(io.STDOUT, u2);
+    io.write_str(io.STDOUT, " counted, "); io.write_int(io.STDOUT, toolong[0]);
     io.write_str(io.STDOUT, " over MAX_URL -> "); io.write_str(io.STDOUT, outpath);
-    io.write_str(io.STDOUT, " ("); io.write_int(io.STDOUT, w);
-    io.write_str(io.STDOUT, " bytes, id "); io.write_int(io.STDOUT, model_id);
+    io.write_str(io.STDOUT, " (");  io.write_int(io.STDOUT, w);
+    io.write_str(io.STDOUT, " bytes, "); io.write_int(io.STDOUT, dofs[4]);
+    io.write_str(io.STDOUT, " of it dictionaries, id "); io.write_int(io.STDOUT, model_id);
     io.write_str(io.STDOUT, ")\n");
 
-    counting.counts_free(&c);
+    counting.counts_free(&cnt);
     return 0;
 }

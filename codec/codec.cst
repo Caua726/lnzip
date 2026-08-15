@@ -1,35 +1,42 @@
 // =======================================================
-// codec/codec.cst — the payload envelope, and raw mode.
+// codec/codec.cst — the payload envelope, and the two ways to fill it.
 //
-// Encoder and decoder live in one file deliberately. They are mirror images:
-// every enc_ call has a dec_ call in the same order with the same context, and
-// a divergence between them is the single failure mode that produces a wrong
-// URL rather than an error. Side by side, a missing line is visible. Split
-// across two files it is a diff nobody reads.
+// Encoder, decoder and the trainer's counting walk live in one file
+// deliberately. They are three traversals of one grammar, and a divergence
+// between any two is the single failure that produces a wrong URL rather than
+// an error. Side by side a missing line is visible; across three files it is a
+// diff nobody reads.
 //
 // THE ENVELOPE. Every payload opens with the model id, coded through
-// probabilities hardcoded in the binary rather than read from a model — at
-// that point in the stream the decoder does not yet know which model to read.
-// Then one bit of mode. Then the mode's own grammar.
+// probabilities hardcoded in the binary — at that point in the stream the
+// decoder does not yet know which model to read. Then one bit of mode.
 //
-// Raw mode is all there is so far: an explicit length, then every byte through
-// the order-2 character model. It is not a fallback that will be replaced —
-// the structural grammar will sit beside it, and the encoder will emit
-// whichever is shorter. Raw is what makes the codec lossless over arbitrary
-// byte strings rather than only over well-formed URLs, and it is what bounds
-// the worst case: nothing can compress to more than "eight bits a byte plus a
-// header" as long as it exists.
+// TWO MODES, AND THE SHORTER ONE WINS. Raw mode codes the bytes through an
+// order-2 character model and knows nothing about URLs; structural mode splits
+// the URL into its components and codes each through a model of its own.
+// Structural is dramatically better on anything that is a URL, and raw is what
+// makes the codec total — it is not a legacy path but the answer for input the
+// splitter refuses. The encoder builds both and emits whichever is smaller,
+// which costs encode time nobody is waiting on.
+//
+// WHY STRUCTURAL NEEDS NO VERIFICATION HERE. url_split guarantees its
+// components tile the input: they and the delimiters its flags claim account
+// for every byte exactly once, checked arithmetically inside url_split itself.
+// So a structural reading always reconstructs, and the choice between modes is
+// about size alone. That stops being free the moment tokenisation enters —
+// splitting a host on '.' and rejoining it is not a tiling — and at that point
+// the encoder will have to reconstruct and compare before trusting itself.
 //
 // LENGTH IS EXPLICIT, NOT TERMINATED. The decoder is handed bytes chosen by
 // whoever typed the link. A length read up front and bounded immediately
-// cannot run away; a terminator symbol that never arrives can. The ratio is
-// close either way and the safety is not.
+// cannot run away; a terminator that never arrives can.
 // =======================================================
 
 use "../core/errno.cst" as errno;
 use "../entropy/rc.cst" as rc;
 use "../model/ctx.cst"  as ctx;
 use "../model/fmt.cst"  as model;
+use "../model/dict.cst" as dict;
 use "../url/split.cst"  as us;
 use "caustic-compact/core/bytes.cst" as bytes;
 use "std/mem.cst" only bins, core as mem;
@@ -41,16 +48,18 @@ let is i64 as ID_BITS with imut = 3;
 
 // Probabilities for the model id. Hardcoded because they must be readable
 // before a model is chosen, and skewed toward the low ids because those are
-// the ones that will be published first and named most. Naming a high id costs
-// about three bits, which is the price of never having to break the format to
-// add a model.
+// published first and named most. Naming a high id costs about three bits,
+// which is the price of never breaking the format to add a model.
+//
+// Held behind a function rather than in a global: the wasm backend does not
+// initialise a global declared from a literal, and a table that reads as zeros
+// there would make every payload undecodable in a browser.
 let is *u16 as _idp with mut;
-let is i32  as _idp_ready with mut = 0;
+let is i64  as _idp_ready with mut = 0;
 
 fn _id_probs() as *u16 {
     if (_idp_ready == 1) { return _idp; }
-    let is *u8 as raw = mem.core.mmap_anon(8 * 2);
-    _idp = cast(*u16, raw);
+    _idp = cast(*u16, mem.core.mmap_anon(8 * 2));
     _idp[1] = cast(u16, 1740);    // root
     _idp[2] = cast(u16, 1450);
     _idp[3] = cast(u16, 1024);
@@ -62,77 +71,47 @@ fn _id_probs() as *u16 {
     return _idp;
 }
 
-// ===================== ENCODE ==========================================
+// Scratch for the losing candidate. The encoder builds both modes and keeps
+// the smaller, so one of them is always thrown away.
+let is bytes.Bytes as _alt with mut;
+let is i64 as _alt_ready with mut = 0;
 
-fn lnz_encode(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) as i64 {
-    if (len <= 0)          { return errno.E_BADURL; }
-    if (len > us.MAX_URL)  { return errno.E_BADURL; }
-
-    let is rc.Enc as e with mut;
-    rc.enc_init(&e, out);
-
-    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
-    rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_RAW);
-
-    // Length as a bit-length bucket through a modelled tree, then the
-    // remainder raw. The bucket carries the shape of the length distribution,
-    // which is where nearly all of the predictability is; the low bits of "is
-    // it 57 or 58 characters" carry none and pretending otherwise costs more
-    // than it saves.
-    let is i64 as bucket = ctx.bitlen(len);
-    rc.enc_tree(&e, m.probs, ctx.CTX_LEN, ctx.LEN_BITS, bucket);
-    if (bucket > 1) {
-        rc.enc_direct(&e, len - (1 << (bucket - 1)), bucket - 1);
+fn _alt_buf() as *bytes.Bytes {
+    if (_alt_ready == 0) {
+        _alt = bytes.bytes_new(16384);
+        _alt_ready = 1;
     }
-
-    let is i64 as p1 with mut = ctx.NOPREV;
-    let is i64 as p2 with mut = ctx.NOPREV;
-    let is i64 as i with mut = 0;
-    while (i < len) {
-        let is i64 as c = cast(i64, src[i]);
-        rc.enc_tree(&e, m.probs, ctx.char_base(p1, p2), 8, c);
-        p2 = p1;
-        p1 = c;
-        i = i + 1;
-    }
-
-    return rc.enc_flush(&e);
+    return &_alt;
 }
 
-// ===================== COUNT ===========================================
+// ===================== SHARED PIECES ===================================
 
-// The trainer's walk over the same grammar, kept in this file for the same
-// reason the decoder is: it has to visit exactly the contexts the encoder
-// visits, in the same order, or the model is trained on slots the codec never
-// spends and spends slots the model never trained. That failure produces no
-// error anywhere — the codec still round-trips, the compression is just
-// quietly worse — so the only real defence is that the three walks are
-// readable together.
-//
-// The model id is not counted: it is coded through probabilities compiled into
-// the binary, since the decoder has to read it before it knows which model to
-// open.
-fn lnz_count(src as *u8, len as i64, n0 as *i64, n1 as *i64) as i64 {
-    if (len <= 0)         { return errno.E_BADURL; }
-    if (len > us.MAX_URL) { return errno.E_BADURL; }
-
-    n0[ctx.CTX_MODE] = n0[ctx.CTX_MODE] + 1;          // MODE_RAW is bit 0
-
-    let is i64 as bucket = ctx.bitlen(len);
-    _count_tree(n0, n1, ctx.CTX_LEN, ctx.LEN_BITS, bucket);
-    // The remainder is coded raw, so there is nothing to count for it.
-
-    let is i64 as p1 with mut = ctx.NOPREV;
-    let is i64 as p2 with mut = ctx.NOPREV;
-    let is i64 as i with mut = 0;
-    while (i < len) {
-        let is i64 as c = cast(i64, src[i]);
-        _count_tree(n0, n1, ctx.char_base(p1, p2), 8, c);
-        p2 = p1;
-        p1 = c;
-        i = i + 1;
+// A length as a bit-length bucket through a modelled tree, then the remainder
+// raw. The bucket carries the shape of the distribution, which is where nearly
+// all the predictability is; the low bits of "is it 57 bytes or 58" carry none
+// and pretending otherwise costs more than it saves.
+fn _enc_len(e as *rc.Enc, probs as *u16, base as i64, n as i64) as void {
+    let is i64 as bucket = ctx.bitlen(n);
+    rc.enc_tree(e, probs, base, ctx.LEN_BITS, bucket);
+    if (bucket > 1) {
+        rc.enc_direct(e, n - (1 << (bucket - 1)), bucket - 1);
     }
-    return 0;
+}
+
+// Returns the length, or a negative error. Zero is legal here — a component
+// can be present and empty — unlike the whole-URL length in raw mode.
+fn _dec_len(d as *rc.Dec, probs as *u16, base as i64) as i64 {
+    let is i64 as bucket = rc.dec_tree(d, probs, base, ctx.LEN_BITS);
+    if (bucket == 0)  { return 0; }
+    if (bucket > 14)  { return errno.E_LIMIT; }     // past MAX_URL's bit-length
+    let is i64 as n with mut = 1 << (bucket - 1);
+    if (bucket > 1) { n = n + rc.dec_direct(d, bucket - 1); }
+    if (n > us.MAX_URL) { return errno.E_LIMIT; }
+    return n;
+}
+
+fn _count_len(n0 as *i64, n1 as *i64, base as i64, n as i64) as void {
+    _count_tree(n0, n1, base, ctx.LEN_BITS, ctx.bitlen(n));
 }
 
 // Walk a tree exactly as enc_tree does, tallying which way each node went.
@@ -148,47 +127,707 @@ fn _count_tree(n0 as *i64, n1 as *i64, base as i64, nbits as i64, value as i64) 
     }
 }
 
-// ===================== DECODE ==========================================
+// ===================== STRUCTURAL MODE =================================
+//
+// One component: its length, then its bytes through that component's own
+// character model. The previous byte resets at every component boundary, so
+// the model is never asked to predict the first byte of a path from the last
+// byte of a host — a correlation that does not exist and would only add noise.
 
-// Every bound below is checked before it is used, and every failure is an
-// error rather than a truncation. The redirect server calls this on request
-// paths, so "decoded to something implausible" has to be a 404 and never a
-// long loop or a write past the end of a buffer.
-fn lnz_decode(src as *u8, slen as i64, m as *model.Model, out as *u8, max as i64) as i64 {
-    let is rc.Dec as d with mut;
-    rc.dec_init(&d, src, slen);
+fn _enc_comp(e as *rc.Enc, m as *model.Model, src as *u8,
+             off as i64, len as i64, comp as i64) as void {
+    _enc_len(e, m.probs, ctx.slen_base(comp), len);
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = cast(i64, src[off + i]);
+        rc.enc_tree(e, m.probs, ctx.schar_base(p1, comp), 8, c);
+        p1 = c;
+        i = i + 1;
+    }
+}
 
-    if (rc.dec_tree(&d, _id_probs(), 0, ID_BITS) != m.model_id) { return errno.E_NOMODEL; }
-    if (rc.dec_bit(&d, cast(i64, m.probs[ctx.CTX_MODE])) != MODE_RAW) {
-        return errno.E_BADPAYLOAD;
+// Writes the component at out[at..], bounds-checked against max. Returns the
+// number of bytes written, or a negative error.
+fn _dec_comp(d as *rc.Dec, m as *model.Model, out as *u8,
+             at as i64, max as i64, comp as i64) as i64 {
+    let is i64 as len = _dec_len(d, m.probs, ctx.slen_base(comp));
+    if (len < 0)        { return len; }
+    if (at + len > max) { return errno.E_LIMIT; }
+
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = rc.dec_tree(d, m.probs, ctx.schar_base(p1, comp), 8);
+        out[at + i] = cast(u8, c);
+        p1 = c;
+        i = i + 1;
+    }
+    return len;
+}
+
+fn _count_comp(n0 as *i64, n1 as *i64, src as *u8,
+               off as i64, len as i64, comp as i64) as void {
+    _count_len(n0, n1, ctx.slen_base(comp), len);
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = cast(i64, src[off + i]);
+        _count_tree(n0, n1, ctx.schar_base(p1, comp), 8, c);
+        p1 = c;
+        i = i + 1;
+    }
+}
+
+
+// ===================== TOKENS ==========================================
+//
+// A component split on its delimiter, with empty parts kept. That last detail
+// is what makes the split lossless without any check: joining the parts of
+// split(s, c) back with c reproduces s for every s, including leading,
+// trailing and doubled delimiters. Tokenising a URL is only dangerous when the
+// split throws something away, and this one throws nothing away.
+//
+// A token is one hit bit and then its rank, or one hit bit and the token
+// spelled out. The rank goes through a bit-length bucket, so the common tokens
+// — which is nearly all of them — cost about two bits.
+
+let is i64 as _DOT   with imut = 46;
+let is i64 as _SLASH with imut = 47;
+let is i64 as _AMP   with imut = 38;
+let is i64 as _EQ    with imut = 61;
+
+fn _tok_count(src as *u8, off as i64, len as i64, delim as i64) as i64 {
+    if (len == 0) { return 0; }
+    let is i64 as n with mut = 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (cast(i64, src[off + i]) == delim) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _enc_token(e as *rc.Enc, m as *model.Model, dictid as i64, comp as i64,
+              src as *u8, off as i64, len as i64) as void {
+    let is *dict.Dict as d = model.model_dict(m, dictid);
+    let is i64 as rank = dict.dict_rank(d, src, off, len);
+    if (rank >= 0) {
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + dictid]), 1);
+        // rank + 1, so that rank zero still has a bit-length.
+        let is i64 as v = rank + 1;
+        let is i64 as bucket = ctx.bitlen(v);
+        rc.enc_tree(e, m.probs, ctx.trank_base(dictid), ctx.RANK_BITS, bucket);
+        if (bucket > 1) { rc.enc_direct(e, v - (1 << (bucket - 1)), bucket - 1); }
+    } else {
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_THIT + dictid]), 0);
+        _enc_comp(e, m, src, off, len, comp);
+    }
+}
+
+fn _dec_token(d as *rc.Dec, m as *model.Model, dictid as i64, comp as i64,
+              out as *u8, at as i64, max as i64) as i64 {
+    if (rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_THIT + dictid])) == 0) {
+        return _dec_comp(d, m, out, at, max, comp);
+    }
+    let is i64 as bucket = rc.dec_tree(d, m.probs, ctx.trank_base(dictid), ctx.RANK_BITS);
+    if (bucket == 0) { return errno.E_BADPAYLOAD; }
+    if (bucket > 20) { return errno.E_LIMIT; }
+    let is i64 as v with mut = 1 << (bucket - 1);
+    if (bucket > 1) { v = v + rc.dec_direct(d, bucket - 1); }
+    let is i64 as rank = v - 1;
+
+    let is *dict.Dict as dd = model.model_dict(m, dictid);
+    if (rank >= dd.count) { return errno.E_BADPAYLOAD; }
+    let is [1]i64 as tl;
+    let is *u8 as tok = dict.dict_get(dd, rank, cast(*i64, &tl));
+    if (at + tl[0] > max) { return errno.E_LIMIT; }
+    let is i64 as i with mut = 0;
+    while (i < tl[0]) { out[at + i] = tok[i]; i = i + 1; }
+    return tl[0];
+}
+
+fn _count_token(m as *model.Model, n0 as *i64, n1 as *i64, dictid as i64, comp as i64,
+                src as *u8, off as i64, len as i64) as void {
+    let is *dict.Dict as d = model.model_dict(m, dictid);
+    let is i64 as rank = dict.dict_rank(d, src, off, len);
+    if (rank >= 0) {
+        n1[ctx.CTX_THIT + dictid] = n1[ctx.CTX_THIT + dictid] + 1;
+        _count_tree(n0, n1, ctx.trank_base(dictid), ctx.RANK_BITS, ctx.bitlen(rank + 1));
+    } else {
+        n0[ctx.CTX_THIT + dictid] = n0[ctx.CTX_THIT + dictid] + 1;
+        _count_comp(n0, n1, src, off, len, comp);
+    }
+}
+
+// A whole component as a delimited list of tokens.
+fn _enc_toks(e as *rc.Enc, m as *model.Model, src as *u8, off as i64, len as i64,
+             delim as i64, dictid as i64, comp as i64) as void {
+    _enc_len(e, m.probs, ctx.tcnt_base(dictid), _tok_count(src, off, len, delim));
+    if (len == 0) { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        let is i64 as at_end = 0;
+        if (i == len) {
+            _enc_token(e, m, dictid, comp, src, off + start, i - start);
+        } else {
+            if (cast(i64, src[off + i]) == delim) {
+                _enc_token(e, m, dictid, comp, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn _dec_toks(d as *rc.Dec, m as *model.Model, out as *u8, at as i64, max as i64,
+             delim as i64, dictid as i64, comp as i64) as i64 {
+    let is i64 as cnt = _dec_len(d, m.probs, ctx.tcnt_base(dictid));
+    if (cnt < 0) { return cnt; }
+    if (cnt > us.MAX_URL) { return errno.E_LIMIT; }
+    let is i64 as w with mut = 0;
+    let is i64 as k with mut = 0;
+    while (k < cnt) {
+        if (k > 0) {
+            if (at + w + 1 > max) { return errno.E_LIMIT; }
+            out[at + w] = cast(u8, delim);
+            w = w + 1;
+        }
+        let is i64 as n = _dec_token(d, m, dictid, comp, out, at + w, max);
+        if (n < 0) { return n; }
+        w = w + n;
+        k = k + 1;
+    }
+    return w;
+}
+
+fn _count_toks(m as *model.Model, n0 as *i64, n1 as *i64, src as *u8, off as i64,
+               len as i64, delim as i64, dictid as i64, comp as i64) as void {
+    _count_len(n0, n1, ctx.tcnt_base(dictid), _tok_count(src, off, len, delim));
+    if (len == 0) { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) {
+            _count_token(m, n0, n1, dictid, comp, src, off + start, i - start);
+        } else {
+            if (cast(i64, src[off + i]) == delim) {
+                _count_token(m, n0, n1, dictid, comp, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// The query, which is where most of the bytes are: parameters split on '&',
+// each split at its FIRST '=' into a key and an optional value. First, not
+// last, because a value may legally contain one — and splitting there is what
+// keeps the rejoin exact.
+fn _enc_param(e as *rc.Enc, m as *model.Model, src as *u8, off as i64, len as i64) as void {
+    let is i64 as eq with mut = 0 - 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (cast(i64, src[off + i]) == _EQ) { eq = i; i = len; }
+        else { i = i + 1; }
+    }
+    if (eq < 0) {
+        _enc_token(e, m, ctx.DICT_KEY, ctx.COMP_KEY, src, off, len);
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_HASVAL]), 0);
+    } else {
+        _enc_token(e, m, ctx.DICT_KEY, ctx.COMP_KEY, src, off, eq);
+        rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_HASVAL]), 1);
+        _enc_token(e, m, ctx.DICT_VAL, ctx.COMP_QUERY, src, off + eq + 1, len - eq - 1);
+    }
+}
+
+fn _dec_param(d as *rc.Dec, m as *model.Model, out as *u8, at as i64, max as i64) as i64 {
+    let is i64 as w with mut = 0;
+    let is i64 as k = _dec_token(d, m, ctx.DICT_KEY, ctx.COMP_KEY, out, at, max);
+    if (k < 0) { return k; }
+    w = w + k;
+    if (rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_HASVAL])) == 1) {
+        if (at + w + 1 > max) { return errno.E_LIMIT; }
+        out[at + w] = cast(u8, _EQ);
+        w = w + 1;
+        let is i64 as v = _dec_token(d, m, ctx.DICT_VAL, ctx.COMP_QUERY, out, at + w, max);
+        if (v < 0) { return v; }
+        w = w + v;
+    }
+    return w;
+}
+
+fn _count_param(m as *model.Model, n0 as *i64, n1 as *i64,
+                src as *u8, off as i64, len as i64) as void {
+    let is i64 as eq with mut = 0 - 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (cast(i64, src[off + i]) == _EQ) { eq = i; i = len; }
+        else { i = i + 1; }
+    }
+    if (eq < 0) {
+        _count_token(m, n0, n1, ctx.DICT_KEY, ctx.COMP_KEY, src, off, len);
+        n0[ctx.CTX_HASVAL] = n0[ctx.CTX_HASVAL] + 1;
+    } else {
+        _count_token(m, n0, n1, ctx.DICT_KEY, ctx.COMP_KEY, src, off, eq);
+        n1[ctx.CTX_HASVAL] = n1[ctx.CTX_HASVAL] + 1;
+        _count_token(m, n0, n1, ctx.DICT_VAL, ctx.COMP_QUERY, src, off + eq + 1, len - eq - 1);
+    }
+}
+
+fn _enc_query(e as *rc.Enc, m as *model.Model, src as *u8, off as i64, len as i64) as void {
+    _enc_len(e, m.probs, ctx.tcnt_base(ctx.DICT_KEY), _tok_count(src, off, len, _AMP));
+    if (len == 0) { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) { _enc_param(e, m, src, off + start, i - start); }
+        else {
+            if (cast(i64, src[off + i]) == _AMP) {
+                _enc_param(e, m, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn _dec_query(d as *rc.Dec, m as *model.Model, out as *u8, at as i64, max as i64) as i64 {
+    let is i64 as cnt = _dec_len(d, m.probs, ctx.tcnt_base(ctx.DICT_KEY));
+    if (cnt < 0) { return cnt; }
+    if (cnt > us.MAX_URL) { return errno.E_LIMIT; }
+    let is i64 as w with mut = 0;
+    let is i64 as k with mut = 0;
+    while (k < cnt) {
+        if (k > 0) {
+            if (at + w + 1 > max) { return errno.E_LIMIT; }
+            out[at + w] = cast(u8, _AMP);
+            w = w + 1;
+        }
+        let is i64 as n = _dec_param(d, m, out, at + w, max);
+        if (n < 0) { return n; }
+        w = w + n;
+        k = k + 1;
+    }
+    return w;
+}
+
+fn _count_query(m as *model.Model, n0 as *i64, n1 as *i64,
+                src as *u8, off as i64, len as i64) as void {
+    _count_len(n0, n1, ctx.tcnt_base(ctx.DICT_KEY), _tok_count(src, off, len, _AMP));
+    if (len == 0) { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) { _count_param(m, n0, n1, src, off + start, i - start); }
+        else {
+            if (cast(i64, src[off + i]) == _AMP) {
+                _count_param(m, n0, n1, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn _flag(e as *rc.Enc, m as *model.Model, which as i64, bit as i64) as void {
+    rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_SFLAG + which]), bit);
+}
+fn _deflag(d as *rc.Dec, m as *model.Model, which as i64) as i64 {
+    return rc.dec_bit(d, cast(i64, m.probs[ctx.CTX_SFLAG + which]));
+}
+fn _cflag(n0 as *i64, n1 as *i64, which as i64, bit as i64) as void {
+    if (bit == 0) { n0[ctx.CTX_SFLAG + which] = n0[ctx.CTX_SFLAG + which] + 1; }
+    else          { n1[ctx.CTX_SFLAG + which] = n1[ctx.CTX_SFLAG + which] + 1; }
+}
+
+fn _is_scheme(sp as *us.Split, want as *u8, n as i64) as i64 {
+    if (sp.has_scheme != 1)  { return 0; }
+    if (sp.scheme_len != n)  { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (sp.src[sp.scheme_off + i] != want[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn _encode_struct(sp as *us.Split, m as *model.Model, out as *bytes.Bytes) as i64 {
+    let is rc.Enc as e with mut;
+    rc.enc_init(&e, out);
+
+    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
+    rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_STRUCT);
+
+    // The scheme, asked as two questions rather than coded as a string. Almost
+    // every URL answers the first one yes, at a cost near zero; the rest pay
+    // one more bit before falling through to the general case.
+    let is i64 as https = _is_scheme(sp, "https", 5);
+    _flag(&e, m, ctx.SF_HTTPS, https);
+    if (https == 0) {
+        let is i64 as http = _is_scheme(sp, "http", 4);
+        _flag(&e, m, ctx.SF_HTTP, http);
+        if (http == 0) {
+            _enc_comp(&e, m, sp.src, sp.scheme_off,
+                      sp.has_scheme * sp.scheme_len, ctx.COMP_SCHEME);
+        }
     }
 
-    let is i64 as bucket = rc.dec_tree(&d, m.probs, ctx.CTX_LEN, ctx.LEN_BITS);
-    if (bucket < 1)  { return errno.E_BADPAYLOAD; }   // the encoder never emits 0
-    if (bucket > 14) { return errno.E_LIMIT; }        // past MAX_URL's bit-length
-
-    let is i64 as len with mut = 1 << (bucket - 1);
-    if (bucket > 1) {
-        len = len + rc.dec_direct(&d, bucket - 1);
+    _flag(&e, m, ctx.SF_SLASH, sp.has_slashes);
+    _flag(&e, m, ctx.SF_HOST,  sp.has_host);
+    if (sp.has_host == 1) {
+        _flag(&e, m, ctx.SF_USER, sp.has_user);
+        if (sp.has_user == 1) {
+            _enc_comp(&e, m, sp.src, sp.user_off, sp.user_len, ctx.COMP_USER);
+        }
+        _enc_toks(&e, m, sp.src, sp.host_off, sp.host_len, _DOT, ctx.DICT_HOST, ctx.COMP_HOST);
+        _flag(&e, m, ctx.SF_PORT, sp.has_port);
+        if (sp.has_port == 1) {
+            _enc_comp(&e, m, sp.src, sp.port_off, sp.port_len, ctx.COMP_PORT);
+        }
     }
-    if (len > us.MAX_URL) { return errno.E_LIMIT; }
-    if (len > max)        { return errno.E_SPACE; }
+
+    _enc_toks(&e, m, sp.src, sp.path_off, sp.path_len, _SLASH, ctx.DICT_PATH, ctx.COMP_PATH);
+
+    _flag(&e, m, ctx.SF_QUERY, sp.has_query);
+    if (sp.has_query == 1) {
+        _enc_query(&e, m, sp.src, sp.query_off, sp.query_len);
+    }
+    _flag(&e, m, ctx.SF_FRAG, sp.has_frag);
+    if (sp.has_frag == 1) {
+        _enc_comp(&e, m, sp.src, sp.frag_off, sp.frag_len, ctx.COMP_FRAG);
+    }
+
+    return rc.enc_flush(&e);
+}
+
+fn _decode_struct(d as *rc.Dec, m as *model.Model, out as *u8, max as i64) as i64 {
+    let is i64 as w with mut = 0;
+
+    // Scheme, then its colon. Written straight out in URL order, which is the
+    // same order url_rebuild lays the components down in.
+    if (_deflag(d, m, ctx.SF_HTTPS) == 1) {
+        if (w + 6 > max) { return errno.E_LIMIT; }
+        out[w] = cast(u8, 104); out[w+1] = cast(u8, 116); out[w+2] = cast(u8, 116);
+        out[w+3] = cast(u8, 112); out[w+4] = cast(u8, 115); out[w+5] = cast(u8, 58);
+        w = w + 6;
+    } else {
+        if (_deflag(d, m, ctx.SF_HTTP) == 1) {
+            if (w + 5 > max) { return errno.E_LIMIT; }
+            out[w] = cast(u8, 104); out[w+1] = cast(u8, 116); out[w+2] = cast(u8, 116);
+            out[w+3] = cast(u8, 112); out[w+4] = cast(u8, 58);
+            w = w + 5;
+        } else {
+            let is i64 as n = _dec_comp(d, m, out, w, max, ctx.COMP_SCHEME);
+            if (n < 0) { return n; }
+            w = w + n;
+            // A zero-length scheme means there was none; the colon only exists
+            // when the scheme does.
+            if (n > 0) {
+                if (w + 1 > max) { return errno.E_LIMIT; }
+                out[w] = cast(u8, 58);
+                w = w + 1;
+            }
+        }
+    }
+
+    if (_deflag(d, m, ctx.SF_SLASH) == 1) {
+        if (w + 2 > max) { return errno.E_LIMIT; }
+        out[w] = cast(u8, 47); out[w+1] = cast(u8, 47);
+        w = w + 2;
+    }
+
+    if (_deflag(d, m, ctx.SF_HOST) == 1) {
+        if (_deflag(d, m, ctx.SF_USER) == 1) {
+            let is i64 as n = _dec_comp(d, m, out, w, max, ctx.COMP_USER);
+            if (n < 0) { return n; }
+            w = w + n;
+            if (w + 1 > max) { return errno.E_LIMIT; }
+            out[w] = cast(u8, 64);
+            w = w + 1;
+        }
+        let is i64 as h = _dec_toks(d, m, out, w, max, _DOT, ctx.DICT_HOST, ctx.COMP_HOST);
+        if (h < 0) { return h; }
+        w = w + h;
+        if (_deflag(d, m, ctx.SF_PORT) == 1) {
+            if (w + 1 > max) { return errno.E_LIMIT; }
+            out[w] = cast(u8, 58);
+            w = w + 1;
+            let is i64 as p = _dec_comp(d, m, out, w, max, ctx.COMP_PORT);
+            if (p < 0) { return p; }
+            w = w + p;
+        }
+    }
+
+    let is i64 as pl = _dec_toks(d, m, out, w, max, _SLASH, ctx.DICT_PATH, ctx.COMP_PATH);
+    if (pl < 0) { return pl; }
+    w = w + pl;
+
+    if (_deflag(d, m, ctx.SF_QUERY) == 1) {
+        if (w + 1 > max) { return errno.E_LIMIT; }
+        out[w] = cast(u8, 63);
+        w = w + 1;
+        let is i64 as q = _dec_query(d, m, out, w, max);
+        if (q < 0) { return q; }
+        w = w + q;
+    }
+    if (_deflag(d, m, ctx.SF_FRAG) == 1) {
+        if (w + 1 > max) { return errno.E_LIMIT; }
+        out[w] = cast(u8, 35);
+        w = w + 1;
+        let is i64 as f = _dec_comp(d, m, out, w, max, ctx.COMP_FRAG);
+        if (f < 0) { return f; }
+        w = w + f;
+    }
+
+    if (w == 0) { return errno.E_BADPAYLOAD; }
+    return w;
+}
+
+fn _count_struct(m as *model.Model, sp as *us.Split, n0 as *i64, n1 as *i64) as void {
+    let is i64 as https = _is_scheme(sp, "https", 5);
+    _cflag(n0, n1, ctx.SF_HTTPS, https);
+    if (https == 0) {
+        let is i64 as http = _is_scheme(sp, "http", 4);
+        _cflag(n0, n1, ctx.SF_HTTP, http);
+        if (http == 0) {
+            _count_comp(n0, n1, sp.src, sp.scheme_off,
+                        sp.has_scheme * sp.scheme_len, ctx.COMP_SCHEME);
+        }
+    }
+    _cflag(n0, n1, ctx.SF_SLASH, sp.has_slashes);
+    _cflag(n0, n1, ctx.SF_HOST,  sp.has_host);
+    if (sp.has_host == 1) {
+        _cflag(n0, n1, ctx.SF_USER, sp.has_user);
+        if (sp.has_user == 1) {
+            _count_comp(n0, n1, sp.src, sp.user_off, sp.user_len, ctx.COMP_USER);
+        }
+        _count_toks(m, n0, n1, sp.src, sp.host_off, sp.host_len, _DOT, ctx.DICT_HOST, ctx.COMP_HOST);
+        _cflag(n0, n1, ctx.SF_PORT, sp.has_port);
+        if (sp.has_port == 1) {
+            _count_comp(n0, n1, sp.src, sp.port_off, sp.port_len, ctx.COMP_PORT);
+        }
+    }
+    _count_toks(m, n0, n1, sp.src, sp.path_off, sp.path_len, _SLASH, ctx.DICT_PATH, ctx.COMP_PATH);
+    _cflag(n0, n1, ctx.SF_QUERY, sp.has_query);
+    if (sp.has_query == 1) {
+        _count_query(m, n0, n1, sp.src, sp.query_off, sp.query_len);
+    }
+    _cflag(n0, n1, ctx.SF_FRAG, sp.has_frag);
+    if (sp.has_frag == 1) {
+        _count_comp(n0, n1, sp.src, sp.frag_off, sp.frag_len, ctx.COMP_FRAG);
+    }
+}
+
+// ===================== RAW MODE ========================================
+
+fn _encode_raw(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) as i64 {
+    let is rc.Enc as e with mut;
+    rc.enc_init(&e, out);
+
+    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
+    rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_RAW);
+    _enc_len(&e, m.probs, ctx.CTX_LEN, len);
 
     let is i64 as p1 with mut = ctx.NOPREV;
     let is i64 as p2 with mut = ctx.NOPREV;
     let is i64 as i with mut = 0;
     while (i < len) {
-        let is i64 as c = rc.dec_tree(&d, m.probs, ctx.char_base(p1, p2), 8);
+        let is i64 as c = cast(i64, src[i]);
+        rc.enc_tree(&e, m.probs, ctx.char_base(p1, p2), 8, c);
+        p2 = p1;
+        p1 = c;
+        i = i + 1;
+    }
+    return rc.enc_flush(&e);
+}
+
+fn _decode_raw(d as *rc.Dec, m as *model.Model, out as *u8, max as i64) as i64 {
+    let is i64 as len = _dec_len(d, m.probs, ctx.CTX_LEN);
+    if (len < 0)  { return len; }
+    if (len == 0) { return errno.E_BADPAYLOAD; }   // the encoder never emits 0
+    if (len > max) { return errno.E_SPACE; }
+
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = rc.dec_tree(d, m.probs, ctx.char_base(p1, p2), 8);
         out[i] = cast(u8, c);
         p2 = p1;
         p1 = c;
         i = i + 1;
     }
+    return len;
+}
+
+fn _count_raw(src as *u8, len as i64, n0 as *i64, n1 as *i64) as void {
+    _count_len(n0, n1, ctx.CTX_LEN, len);
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = cast(i64, src[i]);
+        _count_tree(n0, n1, ctx.char_base(p1, p2), 8, c);
+        p2 = p1;
+        p1 = c;
+        i = i + 1;
+    }
+}
+
+
+// Visit every dictionary token in the URL, in the order the encoder codes
+// them, reporting each to `sink` as fn(ctx, dictid, src, off, len).
+//
+// This exists so the trainer does not carry its own copy of the tokenisation.
+// Which bytes become a host label and which become a query value is a decision
+// the encoder makes; a trainer that made it slightly differently would build
+// dictionaries the encoder then misses, and nothing would fail — the ratio
+// would just be worse for a reason no test could localise. Caustic has no
+// closures, so the sink takes an explicit context pointer.
+fn _walk_toks(sink as *u8, sctx as *u8, src as *u8, off as i64, len as i64,
+              delim as i64, dictid as i64) as void {
+    if (len == 0) { return; }
+    let is i64 as start with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i <= len) {
+        if (i == len) {
+            call(sink, sctx, dictid, src, off + start, i - start);
+        } else {
+            if (cast(i64, src[off + i]) == delim) {
+                call(sink, sctx, dictid, src, off + start, i - start);
+                start = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn _walk_param(sink as *u8, sctx as *u8, src as *u8, off as i64, len as i64) as void {
+    let is i64 as eq with mut = 0 - 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (cast(i64, src[off + i]) == _EQ) { eq = i; i = len; }
+        else { i = i + 1; }
+    }
+    if (eq < 0) {
+        call(sink, sctx, ctx.DICT_KEY, src, off, len);
+    } else {
+        call(sink, sctx, ctx.DICT_KEY, src, off, eq);
+        call(sink, sctx, ctx.DICT_VAL, src, off + eq + 1, len - eq - 1);
+    }
+}
+
+fn lnz_walk_tokens(src as *u8, len as i64, sink as *u8, sctx as *u8) as i64 {
+    if (len <= 0)         { return errno.E_BADURL; }
+    if (len > us.MAX_URL) { return errno.E_BADURL; }
+    let is us.Split as sp = us.url_split(src, len);
+    if (sp.ok != 0) { return sp.ok; }
+
+    if (sp.has_host == 1) {
+        _walk_toks(sink, sctx, sp.src, sp.host_off, sp.host_len, _DOT, ctx.DICT_HOST);
+    }
+    _walk_toks(sink, sctx, sp.src, sp.path_off, sp.path_len, _SLASH, ctx.DICT_PATH);
+    if (sp.has_query == 1) {
+        let is i64 as off = sp.query_off;
+        let is i64 as qlen = sp.query_len;
+        if (qlen > 0) {
+            let is i64 as start with mut = 0;
+            let is i64 as i with mut = 0;
+            while (i <= qlen) {
+                if (i == qlen) { _walk_param(sink, sctx, sp.src, off + start, i - start); }
+                else {
+                    if (cast(i64, sp.src[off + i]) == _AMP) {
+                        _walk_param(sink, sctx, sp.src, off + start, i - start);
+                        start = i + 1;
+                    }
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// ===================== ENTRY POINTS ====================================
+
+fn lnz_encode(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) as i64 {
+    if (len <= 0)          { return errno.E_BADURL; }
+    if (len > us.MAX_URL)  { return errno.E_BADURL; }
+
+    let is us.Split as sp = us.url_split(src, len);
+
+    // Nothing the splitter accepts can fail to reconstruct, so when both are
+    // available the choice is purely about size. Raw wins on the rare input
+    // that is not shaped like a URL at all, which is exactly when it should.
+    if (sp.ok == 0) {
+        let is *bytes.Bytes as alt = _alt_buf();
+        bytes.bytes_reset(alt);
+        let is i64 as ns = _encode_struct(&sp, m, alt);
+
+        bytes.bytes_reset(out);
+        let is i64 as nr = _encode_raw(src, len, m, out);
+
+        if (ns >= 0) {
+            if (nr < 0 || ns < nr) {
+                bytes.bytes_reset(out);
+                if (bytes.bytes_append(out, alt.ptr, alt.len) < 0) { return errno.E_OOM; }
+                return out.len;
+            }
+        }
+        if (nr < 0) { return nr; }
+        return nr;
+    }
+
+    bytes.bytes_reset(out);
+    return _encode_raw(src, len, m, out);
+}
+
+// Every bound below is checked before it is used, and every failure is an
+// error rather than a truncation. The page calls this on whatever was in the
+// address bar, so "decoded to something implausible" has to be a refusal and
+// never a long loop or a write past the end of a buffer.
+fn lnz_decode(src as *u8, slen as i64, m as *model.Model, out as *u8, max as i64) as i64 {
+    let is rc.Dec as d with mut;
+    rc.dec_init(&d, src, slen);
+
+    if (rc.dec_tree(&d, _id_probs(), 0, ID_BITS) != m.model_id) { return errno.E_NOMODEL; }
+
+    let is i64 as mode = rc.dec_bit(&d, cast(i64, m.probs[ctx.CTX_MODE]));
+    let is i64 as n with mut = 0;
+    if (mode == MODE_STRUCT) { n = _decode_struct(&d, m, out, max); }
+    else                     { n = _decode_raw(&d, m, out, max); }
+    if (n < 0) { return n; }
 
     // Checked last, because it is only meaningful once the whole grammar has
     // been read: the coder legitimately reads zeros off the end of a trimmed
     // stream, and only an implausible number of them means the code arrived
     // cut short rather than merely short.
     if (d.past > rc.PAST_OK) { return errno.E_TRUNC; }
-    return len;
+    return n;
+}
+
+// The trainer's walk. Both modes are counted from the same URL, which costs
+// nothing and is strictly better than choosing: the two live in disjoint
+// regions of the probability array, so neither dilutes the other, and the raw
+// model stays trained for the inputs that will need it. Only the mode bit is
+// counted once, for the mode the encoder would actually pick.
+//
+// The model id is not counted: it is coded through probabilities compiled into
+// the binary, since the decoder must read it before it knows which model to
+// open.
+fn lnz_count(src as *u8, len as i64, m as *model.Model, n0 as *i64, n1 as *i64) as i64 {
+    if (len <= 0)         { return errno.E_BADURL; }
+    if (len > us.MAX_URL) { return errno.E_BADURL; }
+
+    let is us.Split as sp = us.url_split(src, len);
+    if (sp.ok == 0) {
+        n1[ctx.CTX_MODE] = n1[ctx.CTX_MODE] + 1;      // MODE_STRUCT is bit 1
+        _count_struct(m, &sp, n0, n1);
+    } else {
+        n0[ctx.CTX_MODE] = n0[ctx.CTX_MODE] + 1;
+    }
+    _count_raw(src, len, n0, n1);
+    return 0;
 }

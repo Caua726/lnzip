@@ -1,0 +1,210 @@
+// =======================================================
+// train/tokens.cst — counting tokens, and choosing which ones to keep.
+//
+// An open-addressed table from token to count, with the tokens themselves in
+// an arena, and one operation on top: take the most frequent N and serialise
+// them as a dictionary.
+//
+// REPRODUCIBILITY IS THE CONSTRAINT THAT SHAPES THIS. A published model id is
+// frozen forever, so the same corpus and the same trainer have to produce the
+// same bytes. Two things here would otherwise break that. Ties in frequency
+// are broken by comparing the tokens themselves, never by which landed in the
+// table first, so the ordering is total and independent of the hash. And when
+// the table fills, insertion stops rather than the table growing — a rehash
+// would be deterministic too, but the stop is visible in the report, and a
+// silent change in capacity is exactly the kind of thing that would make one
+// machine's model differ from another's.
+//
+// The table is sized for a corpus of a few hundred thousand URLs. Beyond that
+// the honest answer is external sorting, and the report says when the cap was
+// hit rather than quietly dropping the tail.
+// =======================================================
+
+use "../core/errno.cst"  as errno;
+use "../model/dict.cst"  as dict;
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/sort.cst" as sort;
+use "std/mem.cst" only bins, core as mem;
+
+let is i64 as _FNV_PRIME with imut = 1099511628211;
+
+struct TokSet {
+    cap  as i64;      // a power of two
+    used as i64;
+    full as i64;      // 1 once insertion stopped
+
+    at   as *i64;     // arena offset + 1 of each slot's token; 0 means empty
+    ln   as *i64;
+    cnt  as *i64;
+
+    arena as *u8;
+    asz   as i64;
+    aus   as i64;
+}
+
+fn tokset_new(t as *TokSet, cap as i64, arena as i64) as i64 {
+    t.cap = cap; t.used = 0; t.full = 0;
+    t.asz = arena; t.aus = 0;
+    t.at  = cast(*i64, mem.core.mmap_anon(cap * 8));
+    t.ln  = cast(*i64, mem.core.mmap_anon(cap * 8));
+    t.cnt = cast(*i64, mem.core.mmap_anon(cap * 8));
+    t.arena = mem.core.mmap_anon(arena);
+    if (cast(i64, t.at) <= 0)    { return errno.E_OOM; }
+    if (cast(i64, t.ln) <= 0)    { return errno.E_OOM; }
+    if (cast(i64, t.cnt) <= 0)   { return errno.E_OOM; }
+    if (cast(i64, t.arena) <= 0) { return errno.E_OOM; }
+    return 0;
+}
+
+fn tokset_free(t as *TokSet) as void {
+    if (cast(i64, t.at) > 0)    { mem.core.munmap(cast(*u8, t.at), t.cap * 8); }
+    if (cast(i64, t.ln) > 0)    { mem.core.munmap(cast(*u8, t.ln), t.cap * 8); }
+    if (cast(i64, t.cnt) > 0)   { mem.core.munmap(cast(*u8, t.cnt), t.cap * 8); }
+    if (cast(i64, t.arena) > 0) { mem.core.munmap(t.arena, t.asz); }
+    t.at = cast(*i64, 0); t.ln = cast(*i64, 0); t.cnt = cast(*i64, 0);
+    t.arena = cast(*u8, 0);
+}
+
+fn _hash(s as *u8, off as i64, len as i64) as i64 {
+    let is i64 as h with mut = (0xcbf29ce4 << 32) | 0x84222325;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        h = h ^ cast(i64, s[off + i]);
+        h = h * _FNV_PRIME;
+        i = i + 1;
+    }
+    return h & 0x7FFFFFFFFFFFFFFF;
+}
+
+fn _eq(t as *TokSet, slot as i64, s as *u8, off as i64, len as i64) as i64 {
+    if (t.ln[slot] != len) { return 0; }
+    let is i64 as a = t.at[slot] - 1;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (t.arena[a + i] != s[off + i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn tokset_add(t as *TokSet, s as *u8, off as i64, len as i64) as void {
+    let is i64 as mask = t.cap - 1;
+    let is i64 as i with mut = _hash(s, off, len) & mask;
+    while (1 == 1) {
+        if (t.at[i] == 0) {
+            // Two thirds is where linear probing starts to cost more than the
+            // tail of the distribution is worth.
+            if (t.full == 1) { return; }
+            if (t.used * 3 >= t.cap * 2) { t.full = 1; return; }
+            if (t.aus + len > t.asz)     { t.full = 1; return; }
+            let is i64 as j with mut = 0;
+            while (j < len) { t.arena[t.aus + j] = s[off + j]; j = j + 1; }
+            t.at[i] = t.aus + 1;
+            t.ln[i] = len;
+            t.cnt[i] = 1;
+            t.aus = t.aus + len;
+            t.used = t.used + 1;
+            return;
+        }
+        if (_eq(t, i, s, off, len) == 1) { t.cnt[i] = t.cnt[i] + 1; return; }
+        i = (i + 1) & mask;
+    }
+}
+
+// The comparators reach the table through a module global, because a Caustic
+// fn_ptr carries no closure. This tool is single-threaded and the pointer is
+// set immediately before each sort.
+let is *TokSet as _sorting with mut;
+
+fn _tok_ptr(slot as i64) as *u8 {
+    return cast(*u8, cast(i64, _sorting.arena) + _sorting.at[slot] - 1);
+}
+
+// Most frequent first; ties by the bytes, so the order is total and does not
+// depend on where the hash happened to put anything.
+fn _by_freq(a as i64, b as i64) as i64 {
+    let is i64 as ca = _sorting.cnt[a];
+    let is i64 as cb0 = _sorting.cnt[b];
+    if (ca > cb0) { return 0 - 1; }
+    if (ca < cb0) { return 1; }
+    return dict.dict_cmp(_tok_ptr(a), _sorting.ln[a], _tok_ptr(b), _sorting.ln[b]);
+}
+
+// Slots ordered by their bytes. This is the index the encoder binary-searches,
+// and it must use the identical comparison dict_rank does.
+fn _by_bytes(a as i64, b as i64) as i64 {
+    return dict.dict_cmp(_tok_ptr(a), _sorting.ln[a], _tok_ptr(b), _sorting.ln[b]);
+}
+
+// Serialise the top `want` tokens as a dictionary, appended to `out`.
+// Returns the number of bytes written, or negative.
+fn tokset_emit(t as *TokSet, want as i64, out as *cb.Bytes) as i64 {
+    let is i64 as start = out.len;
+
+    // Gather the occupied slots.
+    let is *i64 as idx = cast(*i64, mem.core.mmap_anon(t.used * 8 + 8));
+    if (cast(i64, idx) <= 0) { return errno.E_OOM; }
+    let is i64 as n with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < t.cap) {
+        if (t.at[i] != 0) { idx[n] = i; n = n + 1; }
+        i = i + 1;
+    }
+
+    _sorting = t;
+    sort.sort_i64(idx, n, fn_ptr(_by_freq));
+
+    let is i64 as count with mut = want;
+    if (count > n) { count = n; }
+
+    // A second array holding the same slots, ordered by bytes. Its position
+    // tells the encoder where to look; its value is the rank it finds.
+    let is *i64 as lex = cast(*i64, mem.core.mmap_anon(count * 8 + 8));
+    if (cast(i64, lex) <= 0) { return errno.E_OOM; }
+    let is i64 as k with mut = 0;
+    while (k < count) { lex[k] = idx[k]; k = k + 1; }
+    sort.sort_i64(lex, count, fn_ptr(_by_bytes));
+
+    // Slot to rank, so the lex array can be written as ranks. Built by walking
+    // the rank order once rather than searching per entry.
+    let is *i64 as rank_of = cast(*i64, mem.core.mmap_anon(t.cap * 8));
+    if (cast(i64, rank_of) <= 0) { return errno.E_OOM; }
+    k = 0;
+    while (k < count) { rank_of[idx[k]] = k; k = k + 1; }
+
+    let is i64 as blob_len with mut = 0;
+    k = 0;
+    while (k < count) { blob_len = blob_len + t.ln[idx[k]]; k = k + 1; }
+
+    _emit32(out, count);
+    _emit32(out, blob_len);
+    let is i64 as run with mut = 0;
+    _emit32(out, 0);
+    k = 0;
+    while (k < count) {
+        run = run + t.ln[idx[k]];
+        _emit32(out, run);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < count) { _emit32(out, rank_of[lex[k]]); k = k + 1; }
+    k = 0;
+    while (k < count) {
+        let is i64 as a = t.at[idx[k]] - 1;
+        let is i64 as j with mut = 0;
+        while (j < t.ln[idx[k]]) { cb.bytes_push(out, t.arena[a + j]); j = j + 1; }
+        k = k + 1;
+    }
+
+    mem.core.munmap(cast(*u8, idx), t.used * 8 + 8);
+    mem.core.munmap(cast(*u8, lex), count * 8 + 8);
+    mem.core.munmap(cast(*u8, rank_of), t.cap * 8);
+    return out.len - start;
+}
+
+fn _emit32(out as *cb.Bytes, v as i64) as void {
+    cb.bytes_push(out, cast(u8, v & 0xFF));
+    cb.bytes_push(out, cast(u8, (v >> 8) & 0xFF));
+    cb.bytes_push(out, cast(u8, (v >> 16) & 0xFF));
+    cb.bytes_push(out, cast(u8, (v >> 24) & 0xFF));
+}

@@ -15,5 +15,7 @@ use "model/ctx.cst"  as ctx;
 use "model/fmt.cst"  as modelfmt;
 use "codec/codec.cst" as codec;
 use "train/count.cst" as counting;
+use "train/tokens.cst" as toks;
+use "model/dict.cst"  as dict;
 use "fmt/b64url.cst"  as b64;
 use "fmt/uni.cst"     as uni;
