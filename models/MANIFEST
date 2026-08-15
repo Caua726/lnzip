@@ -1,16 +1,32 @@
 # Published models
 #
-# id  tier  sha256  filename
+# id  tier      sha256                                                            bytes       file
 #
-# Nothing is published yet, and until something is, the format is free to move.
+0     tiny      95bae13ae92187461b0def53943a25a37034a89d4ce0b83d9eab94ebef1e99ae  9992675     lnzip-tiny-0.lnzm
+1     standard  0039517583fda9701ec36cef535e9ad638f0e66fc685fe058197b15b05708003  11538805    lnzip-standard-1.lnzm
+#
+# Frozen 2026-08-15, on publication of lnzip.de.
 #
 # Once a line appears here it is permanent. A model id names the statistics a
-# payload was coded against, so a link minted under id 3 only decodes correctly
-# under id 3 — for as long as that link exists, which is forever. A published
+# payload was coded against, so a link minted under id 0 only decodes correctly
+# under id 0 — for as long as that link exists, which is forever. A published
 # model is therefore never re-edited and its id is never reassigned; a retrain
 # gets a new id and the old file stays distributed.
 #
-# The model files themselves are release assets, not source: at Max they are
-# ~90 MB, which does not belong in a git history. The hashes belong here, in
-# the repository, because a link whose model was lost is a dead link and the
-# hash is what proves a recovered copy is the right one.
+# The model files themselves are release assets, not source: they are ten
+# megabytes each, which does not belong in a git history. The hashes belong
+# here, in the repository, because a link whose model was lost is a dead link
+# and the hash is what proves a recovered copy is the right one.
+#
+# BOTH WERE TRAINED ON PUBLIC DATA, and that is a requirement rather than a
+# convenience. A dictionary holds the tokens its corpus contained, so a model
+# trained on someone's browsing would publish their searches. These were
+# trained on 27 million URLs from a Common Crawl index filtered to English and
+# Portuguese, with a floor of eight sightings before any token may enter a
+# dictionary, and the host dictionary seeded from a public popularity list.
+#
+#   id 0  tiny      9.5 MB, 615 KB transferred.  Embedded in the page, so it
+#                   answers with no network at all.  35% of original on URLs
+#                   from domains it has never seen.
+#   id 1  standard  11.5 MB, 1.4 MB transferred.  Fetched once and cached
+#                   forever, since a published model never changes.  34%.
