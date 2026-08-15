@@ -59,6 +59,13 @@ let is i64 as E_IO       with imut = 0 - 1908;
 // rather than assumed.
 let is i64 as E_DESYNC   with imut = 0 - 1909;
 
+// The bytes decoded, but not into anything this format allows: a mode the
+// grammar does not define, a zero length, a field outside its range. Distinct
+// from E_TRUNC because the redirect server wants to tell "someone typed a code
+// that was never minted" apart from "a real code arrived cut short", and the
+// arithmetic decoder is the only place that distinction is still visible.
+let is i64 as E_BADPAYLOAD with imut = 0 - 1910;
+
 fn err_name(e as i64) as *u8 {
     if (e == E_OK)       { return "ok"; }
     if (e == E_TRUNC)    { return "truncated payload"; }
@@ -71,5 +78,6 @@ fn err_name(e as i64) as *u8 {
     if (e == E_BADURL)   { return "input is not a parseable URL"; }
     if (e == E_IO)       { return "io error"; }
     if (e == E_DESYNC)   { return "encoder/decoder desync"; }
+    if (e == E_BADPAYLOAD) { return "payload is not a valid lnzip code"; }
     return "unknown error";
 }

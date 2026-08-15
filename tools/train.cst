@@ -1,0 +1,137 @@
+// =======================================================
+// tools/train.cst — build a model from a corpus.
+//
+//   caustic-mk build train
+//   ./build/train <corpus> <out.lnzm> [model_id] [tier]
+//
+// One URL per line. Streams the file in fixed chunks rather than reading it
+// whole: the corpus this will eventually be pointed at is measured in
+// gigabytes and the machine it runs on has six of them free, so "read the
+// input into memory" is a habit that has to be broken before it is convenient
+// rather than after.
+//
+// Memory here is the two count arrays and nothing else — eight megabytes,
+// independent of corpus size.
+// =======================================================
+
+use "../core/errno.cst"  as errno;
+use "../model/ctx.cst"   as ctx;
+use "../model/fmt.cst"   as model;
+use "../codec/codec.cst" as codec;
+use "../train/count.cst" as counting;
+use "../url/split.cst"   as us;
+use "std/io.cst"         as io;
+use "std/env.cst"        as env;
+use "std/mem.cst" only bins, core as mem;
+
+let is i64 as CHUNK with imut = 1048576;
+let is i64 as _NL   with imut = 10;
+
+fn parse_int(s as *u8) as i64 {
+    let is i64 as v with mut = 0;
+    let is i64 as i with mut = 0;
+    while (s[i] != 0) {
+        let is i64 as c = cast(i64, s[i]);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (i == 0) { return 0 - 1; }
+    return v;
+}
+
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);
+    if (env.argc() < 3) {
+        io.write_str(io.STDERR, "usage: train <corpus> <out.lnzm> [model_id] [tier]\n");
+        return 2;
+    }
+    let is *u8 as corpus  = env.argv(1);
+    let is *u8 as outpath = env.argv(2);
+
+    let is i64 as model_id with mut = 0;
+    if (env.argc() > 3) { model_id = parse_int(env.argv(3)); }
+    let is i64 as tier with mut = model.TIER_TINY;
+    if (env.argc() > 4) { tier = parse_int(env.argv(4)); }
+    if (model_id < 0 || model_id > model.MAX_MODEL_ID) {
+        io.write_str(io.STDERR, "model_id must be 0..7\n");
+        return 2;
+    }
+
+    let is counting.Counts as c with mut;
+    if (counting.counts_new(&c) != 0) {
+        io.write_str(io.STDERR, "out of memory allocating counts\n");
+        return 3;
+    }
+
+    let is i64 as fd = io._open_read(corpus);
+    if (fd < 0) {
+        io.write_str(io.STDERR, "cannot open corpus\n");
+        return 3;
+    }
+
+    let is *u8 as chunk = mem.core.mmap_anon(CHUNK);
+    let is *u8 as line  = mem.core.mmap_anon(us.MAX_URL + 2);
+    if (cast(i64, chunk) <= 0 || cast(i64, line) <= 0) { return 3; }
+
+    let is i64 as fill    with mut = 0;   // bytes held in `line`
+    let is i64 as spilled with mut = 0;   // the current line already overflowed
+    let is i64 as seen    with mut = 0;
+    let is i64 as used    with mut = 0;
+    let is i64 as toolong with mut = 0;
+
+    while (1 == 1) {
+        let is i64 as got = io._read_fd(fd, chunk, CHUNK);
+        if (got <= 0) { break; }
+
+        let is i64 as i with mut = 0;
+        while (i < got) {
+            let is i64 as b = cast(i64, chunk[i]);
+            if (b == _NL) {
+                if (fill > 0 || spilled == 1) { seen = seen + 1; }
+                if (spilled == 1)      { toolong = toolong + 1; }
+                else {
+                    if (fill > 0) {
+                        if (codec.lnz_count(line, fill, c.n0, c.n1) == 0) { used = used + 1; }
+                    }
+                }
+                fill = 0;
+                spilled = 0;
+            } else {
+                if (fill < us.MAX_URL) { line[fill] = cast(u8, b); fill = fill + 1; }
+                else { spilled = 1; }
+            }
+            i = i + 1;
+        }
+    }
+    // A final line with no trailing newline is still a line.
+    if (fill > 0 && spilled == 0) {
+        seen = seen + 1;
+        if (codec.lnz_count(line, fill, c.n0, c.n1) == 0) { used = used + 1; }
+    }
+    io._close_fd(fd);
+
+    let is *u8 as praw = mem.core.mmap_anon(ctx.NPROBS * 2);
+    if (cast(i64, praw) <= 0) { return 3; }
+    let is *u16 as probs = cast(*u16, praw);
+    counting.counts_to_probs(&c, probs);
+
+    let is i64 as w = model.model_write(outpath, model_id, tier, probs);
+    if (w < 0) {
+        io.write_str(io.STDERR, "write failed: ");
+        io.write_str(io.STDERR, errno.err_name(w));
+        io.write_str(io.STDERR, "\n");
+        return 4;
+    }
+
+    io.write_str(io.STDOUT, "train: ");    io.write_int(io.STDOUT, seen);
+    io.write_str(io.STDOUT, " lines, ");   io.write_int(io.STDOUT, used);
+    io.write_str(io.STDOUT, " counted, "); io.write_int(io.STDOUT, toolong);
+    io.write_str(io.STDOUT, " over MAX_URL -> "); io.write_str(io.STDOUT, outpath);
+    io.write_str(io.STDOUT, " ("); io.write_int(io.STDOUT, w);
+    io.write_str(io.STDOUT, " bytes, id "); io.write_int(io.STDOUT, model_id);
+    io.write_str(io.STDOUT, ")\n");
+
+    counting.counts_free(&c);
+    return 0;
+}

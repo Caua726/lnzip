@@ -22,12 +22,16 @@ author "Cauã Alvarenga Neves"
 
 env_default "OPT" "-O1"
 
+// Project level rather than per-target: every target below now reaches the
+// entropy substrate through codec/, and caustic-mk only passes --path to
+// targets that declare a depend of their own.
+depend "caustic-compact" in "https://github.com/Caua726/caustic-compact" tag "v0.1.0"
+
 // ── Targets ──────────────────────────────────────────────────────────
 
 target "run" {
     src "tests/run.cst"
     out "build/run"
-    depend "caustic-compact" in "https://github.com/Caua726/caustic-compact" tag "v0.1.0"
 }
 
 // The corpus gate. Separate from the suite on purpose: the corpus is
@@ -38,6 +42,15 @@ target "run" {
 target "corpus" {
     src "tools/corpus.cst"
     out "build/corpus"
+    flags "-O1"
+}
+
+// The trainer. Counts a corpus into a probability array and writes a model.
+//
+//   caustic-mk build train && ./build/train <corpus> <out.lnzm> [id] [tier]
+target "train" {
+    src "tools/train.cst"
+    out "build/train"
     flags "-O1"
 }
 

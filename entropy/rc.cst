@@ -28,11 +28,18 @@
 // zero bytes are trimmed. The decoder reads zeros past the end of the buffer
 // anyway, so a trimmed byte and a present zero byte are the same stream.
 //
-// PRECONDITION, CHECKED ELSEWHERE. Every probability must lie in 1..2047. A
-// zero or a full 2048 collapses the range and the coder stops being
-// invertible. It is not checked here — that would be two comparisons on the
-// hottest path in the codec, per bit — but once, over the whole array, when
-// the model file is loaded. A model that fails it is rejected outright.
+// PROBABILITIES ARE CLAMPED HERE. Every probability must lie in 1..2047: a
+// zero makes `bound` zero, so the renormalisation loop shifts a range that is
+// already zero and never terminates. In a decoder fed attacker-controlled
+// bytes that is a hang, not a wrong answer.
+//
+// The obvious place to check is once, over the whole array, at load time. That
+// is wrong twice over: it forces every page of a 90 MB model into memory to
+// encode a single URL, and it leaves the coder itself total only by promise.
+// Clamping costs two comparisons per coded bit and a URL codes about a
+// hundred, so the price is nothing measurable. Encoder and decoder clamp
+// identically, so a damaged model yields a wrong URL rather than a hang — and
+// model_verify() is what catches the damage.
 //
 // The arithmetic is integer throughout, deliberately. A link minted today has
 // to decode a decade from now on hardware that does not exist yet; a float
@@ -52,6 +59,15 @@ let is i64 as PROB_MAX   with imut = 2047;
 
 let is i64 as _TOP  with imut = 16777216;       // 1 << 24, the renormalisation floor
 let is i64 as _MASK with imut = 4294967295;     // 0xFFFFFFFF
+
+// Keep a probability inside the range the arithmetic requires. Both sides call
+// it, so the clamp is part of the code and round-trips regardless of what the
+// model says.
+fn clamp(p as i64) as i64 {
+    if (p < PROB_MIN) { return PROB_MIN; }
+    if (p > PROB_MAX) { return PROB_MAX; }
+    return p;
+}
 
 // ===================== ENCODER =========================================
 
@@ -103,7 +119,8 @@ fn _shift_low(e as *Enc) as void {
 }
 
 // Code one bit. `p` is the probability that the bit is 0, out of PROB_ONE.
-fn enc_bit(e as *Enc, p as i64, bit as i64) as void {
+fn enc_bit(e as *Enc, praw as i64, bit as i64) as void {
+    let is i64 as p = clamp(praw);
     let is i64 as bound = (e.range >> PROB_BITS) * p;
     if (bit == 0) {
         e.range = bound;
@@ -232,7 +249,8 @@ fn dec_init(d as *Dec, src as *u8, len as i64) as void {
     }
 }
 
-fn dec_bit(d as *Dec, p as i64) as i64 {
+fn dec_bit(d as *Dec, praw as i64) as i64 {
+    let is i64 as p = clamp(praw);
     let is i64 as bound = (d.range >> PROB_BITS) * p;
     let is i64 as bit with mut = 0;
     if (d.code < bound) {

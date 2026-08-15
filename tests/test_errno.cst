@@ -18,7 +18,7 @@
 use "../core/errno.cst" as errno;
 use "std/io.cst"        as io;
 
-let is i64 as N with imut = 10;
+let is i64 as N with imut = 11;
 
 fn streq(a as *u8, b as *u8) as i64 {
     let is i64 as i with mut = 0;
@@ -42,6 +42,7 @@ fn main() as i32 {
     c[7] = errno.E_BADURL;
     c[8] = errno.E_IO;
     c[9] = errno.E_DESYNC;
+    c[10] = errno.E_BADPAYLOAD;
 
     // E_OK is the only non-negative one, and it must stay 0: callers test
     // `rc < 0`, so a non-zero success code would read as failure nowhere and
@@ -64,6 +65,6 @@ fn main() as i32 {
         i = i + 1;
     }
 
-    io.write_str(io.STDOUT, "errno: 10 codes, distinct, in range, all named\n");
+    io.write_str(io.STDOUT, "errno: 11 codes, distinct, in range, all named\n");
     return 0;
 }

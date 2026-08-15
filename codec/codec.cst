@@ -1,0 +1,194 @@
+// =======================================================
+// codec/codec.cst — the payload envelope, and raw mode.
+//
+// Encoder and decoder live in one file deliberately. They are mirror images:
+// every enc_ call has a dec_ call in the same order with the same context, and
+// a divergence between them is the single failure mode that produces a wrong
+// URL rather than an error. Side by side, a missing line is visible. Split
+// across two files it is a diff nobody reads.
+//
+// THE ENVELOPE. Every payload opens with the model id, coded through
+// probabilities hardcoded in the binary rather than read from a model — at
+// that point in the stream the decoder does not yet know which model to read.
+// Then one bit of mode. Then the mode's own grammar.
+//
+// Raw mode is all there is so far: an explicit length, then every byte through
+// the order-2 character model. It is not a fallback that will be replaced —
+// the structural grammar will sit beside it, and the encoder will emit
+// whichever is shorter. Raw is what makes the codec lossless over arbitrary
+// byte strings rather than only over well-formed URLs, and it is what bounds
+// the worst case: nothing can compress to more than "eight bits a byte plus a
+// header" as long as it exists.
+//
+// LENGTH IS EXPLICIT, NOT TERMINATED. The decoder is handed bytes chosen by
+// whoever typed the link. A length read up front and bounded immediately
+// cannot run away; a terminator symbol that never arrives can. The ratio is
+// close either way and the safety is not.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+use "../entropy/rc.cst" as rc;
+use "../model/ctx.cst"  as ctx;
+use "../model/fmt.cst"  as model;
+use "../url/split.cst"  as us;
+use "caustic-compact/core/bytes.cst" as bytes;
+use "std/mem.cst" only bins, core as mem;
+
+let is i64 as MODE_RAW    with imut = 0;
+let is i64 as MODE_STRUCT with imut = 1;
+
+let is i64 as ID_BITS with imut = 3;
+
+// Probabilities for the model id. Hardcoded because they must be readable
+// before a model is chosen, and skewed toward the low ids because those are
+// the ones that will be published first and named most. Naming a high id costs
+// about three bits, which is the price of never having to break the format to
+// add a model.
+let is *u16 as _idp with mut;
+let is i32  as _idp_ready with mut = 0;
+
+fn _id_probs() as *u16 {
+    if (_idp_ready == 1) { return _idp; }
+    let is *u8 as raw = mem.core.mmap_anon(8 * 2);
+    _idp = cast(*u16, raw);
+    _idp[1] = cast(u16, 1740);    // root
+    _idp[2] = cast(u16, 1450);
+    _idp[3] = cast(u16, 1024);
+    _idp[4] = cast(u16, 1300);
+    _idp[5] = cast(u16, 1024);
+    _idp[6] = cast(u16, 1024);
+    _idp[7] = cast(u16, 1024);
+    _idp_ready = 1;
+    return _idp;
+}
+
+// ===================== ENCODE ==========================================
+
+fn lnz_encode(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) as i64 {
+    if (len <= 0)          { return errno.E_BADURL; }
+    if (len > us.MAX_URL)  { return errno.E_BADURL; }
+
+    let is rc.Enc as e with mut;
+    rc.enc_init(&e, out);
+
+    rc.enc_tree(&e, _id_probs(), 0, ID_BITS, m.model_id);
+    rc.enc_bit(&e, cast(i64, m.probs[ctx.CTX_MODE]), MODE_RAW);
+
+    // Length as a bit-length bucket through a modelled tree, then the
+    // remainder raw. The bucket carries the shape of the length distribution,
+    // which is where nearly all of the predictability is; the low bits of "is
+    // it 57 or 58 characters" carry none and pretending otherwise costs more
+    // than it saves.
+    let is i64 as bucket = ctx.bitlen(len);
+    rc.enc_tree(&e, m.probs, ctx.CTX_LEN, ctx.LEN_BITS, bucket);
+    if (bucket > 1) {
+        rc.enc_direct(&e, len - (1 << (bucket - 1)), bucket - 1);
+    }
+
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = cast(i64, src[i]);
+        rc.enc_tree(&e, m.probs, ctx.char_base(p1, p2), 8, c);
+        p2 = p1;
+        p1 = c;
+        i = i + 1;
+    }
+
+    return rc.enc_flush(&e);
+}
+
+// ===================== COUNT ===========================================
+
+// The trainer's walk over the same grammar, kept in this file for the same
+// reason the decoder is: it has to visit exactly the contexts the encoder
+// visits, in the same order, or the model is trained on slots the codec never
+// spends and spends slots the model never trained. That failure produces no
+// error anywhere — the codec still round-trips, the compression is just
+// quietly worse — so the only real defence is that the three walks are
+// readable together.
+//
+// The model id is not counted: it is coded through probabilities compiled into
+// the binary, since the decoder has to read it before it knows which model to
+// open.
+fn lnz_count(src as *u8, len as i64, n0 as *i64, n1 as *i64) as i64 {
+    if (len <= 0)         { return errno.E_BADURL; }
+    if (len > us.MAX_URL) { return errno.E_BADURL; }
+
+    n0[ctx.CTX_MODE] = n0[ctx.CTX_MODE] + 1;          // MODE_RAW is bit 0
+
+    let is i64 as bucket = ctx.bitlen(len);
+    _count_tree(n0, n1, ctx.CTX_LEN, ctx.LEN_BITS, bucket);
+    // The remainder is coded raw, so there is nothing to count for it.
+
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = cast(i64, src[i]);
+        _count_tree(n0, n1, ctx.char_base(p1, p2), 8, c);
+        p2 = p1;
+        p1 = c;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Walk a tree exactly as enc_tree does, tallying which way each node went.
+fn _count_tree(n0 as *i64, n1 as *i64, base as i64, nbits as i64, value as i64) as void {
+    let is i64 as m with mut = 1;
+    let is i64 as i with mut = nbits;
+    while (i > 0) {
+        i = i - 1;
+        let is i64 as bit = (value >> i) & 1;
+        if (bit == 0) { n0[base + m] = n0[base + m] + 1; }
+        else          { n1[base + m] = n1[base + m] + 1; }
+        m = (m << 1) + bit;
+    }
+}
+
+// ===================== DECODE ==========================================
+
+// Every bound below is checked before it is used, and every failure is an
+// error rather than a truncation. The redirect server calls this on request
+// paths, so "decoded to something implausible" has to be a 404 and never a
+// long loop or a write past the end of a buffer.
+fn lnz_decode(src as *u8, slen as i64, m as *model.Model, out as *u8, max as i64) as i64 {
+    let is rc.Dec as d with mut;
+    rc.dec_init(&d, src, slen);
+
+    if (rc.dec_tree(&d, _id_probs(), 0, ID_BITS) != m.model_id) { return errno.E_NOMODEL; }
+    if (rc.dec_bit(&d, cast(i64, m.probs[ctx.CTX_MODE])) != MODE_RAW) {
+        return errno.E_BADPAYLOAD;
+    }
+
+    let is i64 as bucket = rc.dec_tree(&d, m.probs, ctx.CTX_LEN, ctx.LEN_BITS);
+    if (bucket < 1)  { return errno.E_BADPAYLOAD; }   // the encoder never emits 0
+    if (bucket > 14) { return errno.E_LIMIT; }        // past MAX_URL's bit-length
+
+    let is i64 as len with mut = 1 << (bucket - 1);
+    if (bucket > 1) {
+        len = len + rc.dec_direct(&d, bucket - 1);
+    }
+    if (len > us.MAX_URL) { return errno.E_LIMIT; }
+    if (len > max)        { return errno.E_SPACE; }
+
+    let is i64 as p1 with mut = ctx.NOPREV;
+    let is i64 as p2 with mut = ctx.NOPREV;
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is i64 as c = rc.dec_tree(&d, m.probs, ctx.char_base(p1, p2), 8);
+        out[i] = cast(u8, c);
+        p2 = p1;
+        p1 = c;
+        i = i + 1;
+    }
+
+    // Checked last, because it is only meaningful once the whole grammar has
+    // been read: the coder legitimately reads zeros off the end of a trimmed
+    // stream, and only an implausible number of them means the code arrived
+    // cut short rather than merely short.
+    if (d.past > rc.PAST_OK) { return errno.E_TRUNC; }
+    return len;
+}

@@ -1,0 +1,74 @@
+// =======================================================
+// train/count.cst — counts in, probabilities out.
+//
+// The grammar walk that produces the counts lives in codec/codec.cst next to
+// the encoder that spends them. What is here is the storage and the one piece
+// of arithmetic that turns tallies into a model.
+//
+// REPRODUCIBILITY IS A REQUIREMENT, NOT A NICETY. A published model id is
+// frozen forever, so "the same corpus and the same trainer produce the same
+// bytes" has to be true or the freeze means nothing. Everything below is
+// integer, the traversal order is fixed by the array rather than by any hash,
+// and no floating point appears anywhere — a rounding difference between two
+// machines would mint models that disagree about links already in the wild.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+use "../model/ctx.cst"  as ctx;
+use "../entropy/rc.cst" as rc;
+use "std/mem.cst" only bins, core as mem;
+
+struct Counts {
+    n0 as *i64;
+    n1 as *i64;
+    n  as i64;
+}
+
+fn counts_new(c as *Counts) as i64 {
+    let is i64 as bytes_each = ctx.NPROBS * 8;
+    c.n0 = cast(*i64, mem.core.mmap_anon(bytes_each));
+    if (cast(i64, c.n0) <= 0) { return errno.E_OOM; }
+    c.n1 = cast(*i64, mem.core.mmap_anon(bytes_each));
+    if (cast(i64, c.n1) <= 0) {
+        mem.core.munmap(cast(*u8, c.n0), bytes_each);
+        c.n0 = cast(*i64, 0);
+        return errno.E_OOM;
+    }
+    c.n = ctx.NPROBS;
+    // mmap_anon hands back zeroed pages, so the tallies start at zero without
+    // a pass over eight megabytes.
+    return 0;
+}
+
+fn counts_free(c as *Counts) as void {
+    let is i64 as bytes_each = ctx.NPROBS * 8;
+    if (cast(i64, c.n0) > 0) { mem.core.munmap(cast(*u8, c.n0), bytes_each); }
+    if (cast(i64, c.n1) > 0) { mem.core.munmap(cast(*u8, c.n1), bytes_each); }
+    c.n0 = cast(*i64, 0);
+    c.n1 = cast(*i64, 0);
+    c.n = 0;
+}
+
+// Krichevsky-Trofimov: p = (n0 + 1/2) / (n0 + n1 + 1), scaled to 2048 and done
+// in integers as ((2*n0 + 1) * 1024) / (n0 + n1 + 1).
+//
+// The half-count prior is doing real work here, not decoration. A slot seen a
+// thousand times as zero and never as one is not certain — it is a slot whose
+// next observation could still be a one, and a model that says 2048 there
+// makes that URL cost eleven bits instead of the tenth of one it should. A
+// slot never seen at all lands on exactly 1024, which is the honest answer for
+// a context the corpus never visited. And the estimate can never reach 0 or
+// 2048, which is the range the coder requires.
+//
+// Overflow is not a concern: a corpus large enough to make (2*n0+1)*1024
+// exceed 2^63 would need about 4.5e15 observations of one slot.
+fn counts_to_probs(c as *Counts, probs as *u16) as void {
+    let is i64 as i with mut = 0;
+    while (i < c.n) {
+        let is i64 as a = c.n0[i];
+        let is i64 as b = c.n1[i];
+        let is i64 as p = ((2 * a + 1) * 1024) / (a + b + 1);
+        probs[i] = cast(u16, rc.clamp(p));
+        i = i + 1;
+    }
+}

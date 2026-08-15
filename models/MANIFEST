@@ -1,0 +1,16 @@
+# Published models
+#
+# id  tier  sha256  filename
+#
+# Nothing is published yet, and until something is, the format is free to move.
+#
+# Once a line appears here it is permanent. A model id names the statistics a
+# payload was coded against, so a link minted under id 3 only decodes correctly
+# under id 3 — for as long as that link exists, which is forever. A published
+# model is therefore never re-edited and its id is never reassigned; a retrain
+# gets a new id and the old file stays distributed.
+#
+# The model files themselves are release assets, not source: at Max they are
+# ~90 MB, which does not belong in a git history. The hashes belong here, in
+# the repository, because a link whose model was lost is a dead link and the
+# hash is what proves a recovered copy is the right one.

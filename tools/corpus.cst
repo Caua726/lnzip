@@ -1,44 +1,49 @@
 // =======================================================
-// tools/corpus.cst — run the round-trip gate over a real corpus.
+// tools/corpus.cst — the round-trip gate, over a real corpus.
 //
-//   caustic-mk build corpus && ./build/corpus <file-of-urls>
+//   caustic-mk build corpus
+//   ./build/corpus <file-of-urls> [model.lnzm]
 //
-// One URL per line. For every line it splits, checks the tiling invariant,
-// rebuilds, and compares byte for byte. The design calls this the gate that
-// matters more than any other: a codec that is lossless on the forty cases
-// someone thought of is not lossless, and only a corpus of URLs nobody chose
-// says otherwise.
+// One URL per line. Two stages run over every line:
 //
-// It is deliberately not part of `caustic-mk run test`. The corpus lives
-// outside the repository — it is gigabytes and it is not source — so a suite
-// that depended on it would fail on a fresh clone for a reason that has
-// nothing to do with the code.
+//   split   the components tile the input and rebuild it byte for byte
+//   codec   encode then decode returns exactly the bytes that went in
 //
-// Exit is 0 only if no line failed. Lines past MAX_URL are counted apart and
-// are not failures: the codec answers those in raw mode, which is a design
-// decision rather than a defect. This file grows a stage per phase; today it
-// gates the splitter.
+// The design calls this the gate that matters more than any other, and the
+// reason is worth restating: a codec that is lossless on the cases someone
+// thought of is not lossless. Only URLs nobody chose say otherwise.
+//
+// With a model it also measures, and the measurement is only honest against a
+// corpus the trainer never saw. Training and measuring on the same file
+// reports memorisation and calls it compression.
+//
+// Kept out of `caustic-mk run test` deliberately: the corpus is gigabytes and
+// lives outside the repository, so a suite that needed it would fail on a
+// fresh clone for a reason unrelated to the code.
 // =======================================================
 
-use "../url/split.cst"  as us;
-use "../core/errno.cst" as errno;
-use "std/io.cst"        as io;
-use "std/env.cst"       as env;
+use "../url/split.cst"   as us;
+use "../core/errno.cst"  as errno;
+use "../model/fmt.cst"   as model;
+use "../codec/codec.cst" as codec;
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/io.cst"         as io;
+use "std/env.cst"        as env;
 use "std/mem.cst" only bins, core as mem;
 
 let is i64 as _NL with imut = 10;
 
 // How many failing lines to print before going quiet. Enough to see the shape
-// of a bug, few enough that a systematic break does not scroll the cause off
-// the screen.
+// of a bug, few enough that a systematic break does not scroll its own cause
+// off the screen.
 let is i64 as MAX_REPORT with imut = 20;
 
-fn _show(tag as *u8, src as *u8, off as i64, len as i64) as void {
+fn _show(tag as *u8, src as *u8, len as i64) as void {
     io.write_str(io.STDERR, tag);
     let is i64 as i with mut = 0;
     while (i < len) {
         let is [2]u8 as ch;
-        ch[0] = src[off + i];
+        ch[0] = src[i];
         ch[1] = cast(u8, 0);
         io.write_str(io.STDERR, cast(*u8, &ch));
         i = i + 1;
@@ -49,10 +54,28 @@ fn _show(tag as *u8, src as *u8, off as i64, len as i64) as void {
 fn main(argc as i64, argv as *u8) as i32 {
     env.init(argc, argv);
     if (env.argc() < 2) {
-        io.write_str(io.STDERR, "usage: corpus <file-of-urls>\n");
+        io.write_str(io.STDERR, "usage: corpus <file-of-urls> [model.lnzm]\n");
         return 2;
     }
     let is *u8 as path = env.argv(1);
+
+    let is model.Model as m with mut;
+    let is i64 as have_model with mut = 0;
+    if (env.argc() > 2) {
+        let is i64 as mo = model.model_open(&m, env.argv(2));
+        if (mo != 0) {
+            io.write_str(io.STDERR, "model: "); io.write_str(io.STDERR, errno.err_name(mo));
+            io.write_str(io.STDERR, "\n");
+            return 3;
+        }
+        if (model.model_verify(&m) != 0) {
+            io.write_str(io.STDERR, "model failed its content hash\n");
+            return 3;
+        }
+    } else {
+        if (model.model_builtin(&m) != 0) { return 3; }
+    }
+    have_model = 1;
 
     let is i64 as size = io.file_size(path);
     if (size <= 0) {
@@ -60,7 +83,6 @@ fn main(argc as i64, argv as *u8) as i32 {
         io.write_str(io.STDERR, "\n");
         return 2;
     }
-
     let is *u8 as buf = mem.core.mmap_anon(size + 1);
     if (cast(i64, buf) <= 0) { return 3; }
 
@@ -75,12 +97,17 @@ fn main(argc as i64, argv as *u8) as i32 {
     io._close_fd(fd);
 
     let is [9000]u8 as out;
+    let is cb.Bytes as pay with mut = cb.bytes_new(16384);
 
     let is i64 as lines   with mut = 0;
-    let is i64 as passed  with mut = 0;
-    let is i64 as oversz  with mut = 0;   // past MAX_URL: raw mode's job, not a failure
+    let is i64 as oversz  with mut = 0;   // past MAX_URL: raw mode's job upstream
+    let is i64 as ok_split with mut = 0;
+    let is i64 as ok_codec with mut = 0;
     let is i64 as bad     with mut = 0;
     let is i64 as shown   with mut = 0;
+
+    let is i64 as raw_bytes  with mut = 0;
+    let is i64 as comp_bytes with mut = 0;
 
     let is i64 as p with mut = 0;
     while (p < got) {
@@ -93,14 +120,15 @@ fn main(argc as i64, argv as *u8) as i32 {
         if (len > 0) {
             lines = lines + 1;
             let is *u8 as s = cast(*u8, cast(i64, buf) + p);
-            let is us.Split as sp = us.url_split(s, len);
+            let is i64 as fail with mut = 0;
 
+            // ── stage 1: the splitter tiles and rebuilds ──────────
+            let is us.Split as sp = us.url_split(s, len);
             if (sp.ok == errno.E_BADURL) {
                 oversz = oversz + 1;
             } else {
-                let is i64 as fail with mut = 0;
-                if (sp.ok != 0)                  { fail = 1; }
-                if (us.url_tiles(&sp) != 1)      { fail = 2; }
+                if (sp.ok != 0)             { fail = 1; }
+                if (us.url_tiles(&sp) != 1) { fail = 2; }
                 if (fail == 0) {
                     let is i64 as w = us.url_rebuild(&sp, cast(*u8, &out), 9000);
                     if (w != len) { fail = 3; }
@@ -112,8 +140,31 @@ fn main(argc as i64, argv as *u8) as i32 {
                         }
                     }
                 }
-                if (fail == 0) { passed = passed + 1; }
-                else {
+                if (fail == 0) { ok_split = ok_split + 1; }
+
+                // ── stage 2: encode, decode, compare ─────────────
+                if (fail == 0) {
+                    cb.bytes_reset(&pay);
+                    let is i64 as n = codec.lnz_encode(s, len, &m, &pay);
+                    if (n < 0) { fail = 5; }
+                    else {
+                        raw_bytes = raw_bytes + len;
+                        comp_bytes = comp_bytes + n;
+                        let is i64 as d = codec.lnz_decode(pay.ptr, pay.len, &m,
+                                                           cast(*u8, &out), 9000);
+                        if (d != len) { fail = 6; }
+                        else {
+                            let is i64 as i with mut = 0;
+                            while (i < len) {
+                                if (out[i] != s[i]) { fail = 7; i = len; }
+                                else { i = i + 1; }
+                            }
+                        }
+                    }
+                    if (fail == 0) { ok_codec = ok_codec + 1; }
+                }
+
+                if (fail != 0) {
                     bad = bad + 1;
                     if (shown < MAX_REPORT) {
                         shown = shown + 1;
@@ -121,7 +172,7 @@ fn main(argc as i64, argv as *u8) as i32 {
                         io.write_int(io.STDERR, fail);
                         io.write_str(io.STDERR, " line ");
                         io.write_int(io.STDERR, lines);
-                        _show(": ", s, 0, len);
+                        _show(": ", s, len);
                     }
                 }
             }
@@ -129,12 +180,28 @@ fn main(argc as i64, argv as *u8) as i32 {
         p = e + 1;
     }
 
-    io.write_str(io.STDOUT, "corpus: ");   io.write_int(io.STDOUT, lines);
-    io.write_str(io.STDOUT, " lines, ");   io.write_int(io.STDOUT, passed);
-    io.write_str(io.STDOUT, " round-trip byte-exact, "); io.write_int(io.STDOUT, oversz);
-    io.write_str(io.STDOUT, " over MAX_URL (raw mode), "); io.write_int(io.STDOUT, bad);
+    io.write_str(io.STDOUT, "corpus: ");     io.write_int(io.STDOUT, lines);
+    io.write_str(io.STDOUT, " lines, split "); io.write_int(io.STDOUT, ok_split);
+    io.write_str(io.STDOUT, " ok, codec ");  io.write_int(io.STDOUT, ok_codec);
+    io.write_str(io.STDOUT, " ok, ");        io.write_int(io.STDOUT, oversz);
+    io.write_str(io.STDOUT, " over MAX_URL, "); io.write_int(io.STDOUT, bad);
     io.write_str(io.STDOUT, " FAILED\n");
 
+    if (raw_bytes > 0) {
+        // Percent rather than a ratio, because printf has no %f and an integer
+        // ratio would round every interesting result to 1.
+        io.write_str(io.STDOUT, "size:   ");   io.write_int(io.STDOUT, raw_bytes);
+        io.write_str(io.STDOUT, " -> ");       io.write_int(io.STDOUT, comp_bytes);
+        io.write_str(io.STDOUT, " bytes (");   io.write_int(io.STDOUT, (comp_bytes * 100) / raw_bytes);
+        io.write_str(io.STDOUT, "%), mean ");  io.write_int(io.STDOUT, raw_bytes / ok_codec);
+        io.write_str(io.STDOUT, " -> ");       io.write_int(io.STDOUT, comp_bytes / ok_codec);
+        io.write_str(io.STDOUT, " bytes/url, about ");
+        // Base64URL is 6 bits a character; fmt/b64url.cst will make this exact.
+        io.write_str(io.STDOUT, "");           io.write_int(io.STDOUT, ((comp_bytes / ok_codec) * 8 + 5) / 6);
+        io.write_str(io.STDOUT, " base64 chars\n");
+    }
+
+    if (have_model == 1) { model.model_free(&m); }
     if (bad > 0) { return 1; }
     return 0;
 }

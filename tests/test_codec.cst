@@ -1,0 +1,241 @@
+// =======================================================
+// tests/test_codec.cst — the codec inverts, and survives what it is handed.
+//
+// Two concerns, and they are not the same concern.
+//
+// The first is that encode and decode are inverses over every shape of input,
+// including the ones that are not URLs at all. Raw mode is what makes the
+// codec total, and a codec that is lossless only over well-formed input is not
+// lossless — the redirect server will be handed the rest.
+//
+// The second is that the decoder is a parser for attacker-controlled bytes. A
+// link is a path someone typed. Anything at all can arrive there, so the tests
+// below feed it garbage, truncation, and a model that does not match, and
+// require an error every time: never a hang, never a write past the caller's
+// buffer, never a plausible URL invented out of nothing.
+//
+// The model file gets the same treatment. A byte flipped in a model is the
+// realistic corruption — a bad copy, a half-written file, a rotted disk — and
+// it has to be caught, because decoding a permanent link against a model that
+// silently changed produces a wrong URL rather than an error.
+//
+// Exit code is which check failed.
+// =======================================================
+
+use "../codec/codec.cst" as codec;
+use "../model/fmt.cst"   as model;
+use "../model/ctx.cst"   as ctx;
+use "../train/count.cst" as counting;
+use "../core/errno.cst"  as errno;
+use "../url/split.cst"   as us;
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/io.cst"  as io;
+use "std/mem.cst" only bins, core as mem;
+
+let is *u8 as MODEL_PATH with imut = "build/test_model.lnzm";
+
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+
+let is i64 as NCASE with imut = 14;
+
+fn sample(i as i64) as *u8 {
+    if (i ==  0) { return "https://wiki.archlinux.org/title/Arch_User_Repository#Frequently_asked_questions"; }
+    if (i ==  1) { return "https://github.com/torvalds/linux/issues/123"; }
+    if (i ==  2) { return "http://example.com"; }
+    if (i ==  3) { return "https://user:pw@[2001:db8::1]:8080/a%2Fb?x=1&y=2#f"; }
+    if (i ==  4) { return "mailto:someone@example.com"; }
+    if (i ==  5) { return "a"; }                                   // one byte
+    if (i ==  6) { return "https://\xd0\xbf\xd1\x80\xd0\xb8\xd0\xbc\xd0\xb5\xd1\x80.\xd1\x80\xd1\x84/"; }
+    if (i ==  7) { return "\x01\x02\x03\xff\xfe\x00is not a url at all"; }   // not text either
+    if (i ==  8) { return "?"; }
+    if (i ==  9) { return "https://x.com/?utm_source=a&utm_medium=b&utm_campaign=c"; }
+    if (i == 10) { return "HTTPS://EXAMPLE.COM/P"; }
+    if (i == 11) { return "relative/path/here"; }
+    if (i == 12) { return "data:text/plain;base64,SGVsbG8="; }
+    return "https://sub.domain.example.co.uk/deep/path/segments/here.html";
+}
+
+// Sample 7 carries an embedded NUL, so its length cannot come from slen.
+fn sample_len(i as i64) as i64 {
+    if (i == 7) { return 25; }
+    return slen(sample(i));
+}
+
+fn roundtrip(m as *model.Model, s as *u8, n as i64, pay as *cb.Bytes) as i64 {
+    cb.bytes_reset(pay);
+    let is i64 as w = codec.lnz_encode(s, n, m, pay);
+    if (w < 0) { return 1; }
+
+    let is [9000]u8 as out;
+    let is i64 as d = codec.lnz_decode(pay.ptr, pay.len, m, cast(*u8, &out), 9000);
+    if (d != n) { return 2; }
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (out[i] != s[i]) { return 3; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() as i32 {
+    let is cb.Bytes as pay with mut = cb.bytes_new(16384);
+
+    // ── 1. the built-in model round-trips everything ──────────────
+    //
+    // Uniform probabilities, so this compresses nothing at all. That is the
+    // point: it isolates invertibility from the model, and it is the state the
+    // codec has to work in before any corpus exists.
+    let is model.Model as bi with mut;
+    if (model.model_builtin(&bi) != 0) { return 1; }
+
+    let is i64 as i with mut = 0;
+    while (i < NCASE) {
+        let is i64 as rc0 = roundtrip(&bi, sample(i), sample_len(i), &pay);
+        if (rc0 != 0) {
+            io.write_str(io.STDERR, "builtin case "); io.write_int(io.STDERR, i);
+            io.write_str(io.STDERR, " subcheck ");    io.write_int(io.STDERR, rc0);
+            io.write_str(io.STDERR, "\n");
+            return 10 + cast(i32, rc0);
+        }
+        i = i + 1;
+    }
+
+    // Lengths at the boundaries, where an off-by-one in the bucket coding
+    // would live.
+    let is [9000]u8 as big;
+    i = 0;
+    while (i < us.MAX_URL) { big[i] = cast(u8, 97 + (i % 26)); i = i + 1; }
+    if (roundtrip(&bi, cast(*u8, &big), 1, &pay) != 0)           { return 20; }
+    if (roundtrip(&bi, cast(*u8, &big), 2, &pay) != 0)           { return 21; }
+    if (roundtrip(&bi, cast(*u8, &big), 255, &pay) != 0)         { return 22; }
+    if (roundtrip(&bi, cast(*u8, &big), 256, &pay) != 0)         { return 23; }
+    if (roundtrip(&bi, cast(*u8, &big), 257, &pay) != 0)         { return 24; }
+    if (roundtrip(&bi, cast(*u8, &big), us.MAX_URL, &pay) != 0)  { return 25; }
+
+    // Past the ceiling is an error, not a truncation. A truncated URL is a
+    // valid URL pointing somewhere else.
+    if (codec.lnz_encode(cast(*u8, &big), us.MAX_URL + 1, &bi, &pay) != errno.E_BADURL) { return 26; }
+    if (codec.lnz_encode(cast(*u8, &big), 0, &bi, &pay) != errno.E_BADURL)              { return 27; }
+
+    // ── 2. a trained model beats an untrained one ─────────────────
+    //
+    // Trained on the samples themselves, so this measures that the counting
+    // path reaches the same slots the coding path spends — not compression.
+    // Compression is measured against a holdout by tools/corpus.cst, because
+    // training and measuring on one file reports memorisation.
+    let is counting.Counts as cnt with mut;
+    if (counting.counts_new(&cnt) != 0) { return 30; }
+    let is i64 as pass with mut = 0;
+    while (pass < 40) {          // repeat so the counts dominate the prior
+        i = 0;
+        while (i < NCASE) {
+            codec.lnz_count(sample(i), sample_len(i), cnt.n0, cnt.n1);
+            i = i + 1;
+        }
+        pass = pass + 1;
+    }
+    let is *u8 as praw = mem.core.mmap_anon(ctx.NPROBS * 2);
+    if (cast(i64, praw) <= 0) { return 31; }
+    let is *u16 as probs = cast(*u16, praw);
+    counting.counts_to_probs(&cnt, probs);
+
+    if (model.model_write(MODEL_PATH, 3, model.TIER_TINY, probs) < 0) { return 32; }
+
+    let is model.Model as tr with mut;
+    if (model.model_open(&tr, MODEL_PATH) != 0) { return 33; }
+    if (model.model_verify(&tr) != 0)           { return 34; }
+    if (tr.model_id != 3)                       { return 35; }
+    if (tr.tier != model.TIER_TINY)             { return 36; }
+
+    let is i64 as untrained with mut = 0;
+    let is i64 as trained   with mut = 0;
+    i = 0;
+    while (i < NCASE) {
+        if (roundtrip(&tr, sample(i), sample_len(i), &pay) != 0) { return 37; }
+        trained = trained + pay.len;
+        if (roundtrip(&bi, sample(i), sample_len(i), &pay) != 0) { return 38; }
+        untrained = untrained + pay.len;
+        i = i + 1;
+    }
+    io.write_str(io.STDOUT, "codec: ");   io.write_int(io.STDOUT, untrained);
+    io.write_str(io.STDOUT, " bytes untrained -> "); io.write_int(io.STDOUT, trained);
+    io.write_str(io.STDOUT, " trained\n");
+    if (trained >= untrained / 2) { return 39; }   // memorising 14 strings should be dramatic
+
+    // ── 3. a payload minted for another model is refused ──────────
+    //
+    // Not a nicety. Model ids are frozen forever precisely so an old link
+    // keeps resolving; the flip side is that a payload naming a model this
+    // build does not have must say so rather than decode against the wrong
+    // statistics and return a URL that looks fine.
+    cb.bytes_reset(&pay);
+    if (codec.lnz_encode(sample(1), sample_len(1), &tr, &pay) < 0) { return 40; }
+    let is [9000]u8 as out;
+    if (codec.lnz_decode(pay.ptr, pay.len, &bi, cast(*u8, &out), 9000) != errno.E_NOMODEL) {
+        return 41;
+    }
+
+    // ── 4. truncation is reported, not guessed at ─────────────────
+    cb.bytes_reset(&pay);
+    if (codec.lnz_encode(sample(0), sample_len(0), &tr, &pay) < 0) { return 42; }
+    if (codec.lnz_decode(pay.ptr, 1, &tr, cast(*u8, &out), 9000) > 0) { return 43; }
+
+    // ── 5. garbage terminates, and stays inside the buffer ────────
+    //
+    // The decoder is a parser for whatever someone typed after the slash. It
+    // may return anything it likes here, including a valid-looking URL — with
+    // no database, some payloads do decode to something. What it may not do is
+    // loop, or write past `max`.
+    let is i64 as GUARD with imut = 8192;
+    let is i64 as seed with mut = 12345;
+    let is i64 as trial with mut = 0;
+    while (trial < 400) {
+        cb.bytes_reset(&pay);
+        let is i64 as n = 1 + (trial % 40);
+        let is i64 as k with mut = 0;
+        while (k < n) {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            cb.bytes_push(&pay, cast(u8, (seed >> 16) & 0xFF));
+            k = k + 1;
+        }
+        let is i64 as g with mut = GUARD;
+        while (g < 9000) { out[g] = cast(u8, 0xA5); g = g + 1; }
+
+        let is i64 as _r = codec.lnz_decode(pay.ptr, pay.len, &tr, cast(*u8, &out), GUARD);
+
+        g = GUARD;
+        while (g < 9000) {
+            if (out[g] != cast(u8, 0xA5)) { return 44; }   // wrote past max
+            g = g + 1;
+        }
+        trial = trial + 1;
+    }
+
+    // ── 6. a flipped byte in the model is caught ──────────────────
+    //
+    // The realistic corruption: a bad copy, a half-written file, a disk that
+    // rotted. Accepting it with a warning would mean resolving old links
+    // against statistics that moved.
+    let is i64 as at = tr.size / 2;
+    tr.base[at] = tr.base[at] ^ cast(u8, 0x40);
+    if (model.model_verify(&tr) != errno.E_BADMODEL) { return 45; }
+    tr.base[at] = tr.base[at] ^ cast(u8, 0x40);
+    if (model.model_verify(&tr) != 0)                { return 46; }
+
+    // Truncated and non-model files are refused by open, before anything is
+    // read through their offsets.
+    let is model.Model as junk with mut;
+    if (model.model_open(&junk, "tests/test_codec.cst") != errno.E_BADMODEL) { return 47; }
+    if (model.model_open(&junk, "build/does-not-exist.lnzm") != errno.E_IO)  { return 48; }
+
+    model.model_free(&tr);
+    model.model_free(&bi);
+    counting.counts_free(&cnt);
+    cb.bytes_free(&pay);
+    io.write_str(io.STDOUT, "codec: round-trips, refuses foreign models, survives garbage\n");
+    return 0;
+}

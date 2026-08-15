@@ -1,0 +1,109 @@
+// =======================================================
+// model/ctx.cst — where every probability lives.
+//
+// This is the most load-bearing file in the repository, and it is load-bearing
+// for a boring reason: the trainer and the codec both import it. A probability
+// is only meaningful if the thing that counted it and the thing that spends it
+// agree on which slot it is. If those two ever disagree the model is still a
+// valid file, the codec still round-trips, and the compression quietly gets
+// worse for reasons no test can localise. So the layout is here, once, and
+// neither side is allowed its own copy of any of these numbers.
+//
+// The array is flat u16, indexed by a context number. Each region below is a
+// base offset into it; a new region is added here and nowhere else.
+//
+// THE CHARACTER MODEL. Order-2, but not a full one. A true order-2 model over
+// bytes is 65536 contexts of 256 tree slots — 33 MB of probabilities, sixteen
+// times the entire Tiny budget, to model a string sixty bytes long. So the
+// immediately preceding byte is kept whole, because in a URL it predicts an
+// enormous amount ("t" after "h" after "t"), and the byte before that is
+// reduced to one of eight classes. Which class a byte falls into is the part
+// of it that still predicts at distance two: after a '/' the next-but-one byte
+// behaves like the start of a path segment whichever letter it was.
+//
+// That gives 2048 contexts and just over a megabyte of probabilities, which
+// leaves room inside Tiny for the dictionaries the grammar layer will want.
+// =======================================================
+
+// Eight classes for the byte at distance two. Everything a URL is made of that
+// carries structural meaning gets its own; letters and digits share by case
+// and kind, because at distance two that is all that survives.
+let is i64 as NCLASS with imut = 8;
+
+let is i64 as CLS_LOWER with imut = 0;
+let is i64 as CLS_UPPER with imut = 1;
+let is i64 as CLS_DIGIT with imut = 2;
+let is i64 as CLS_SLASH with imut = 3;   // /
+let is i64 as CLS_DOT   with imut = 4;   // .
+let is i64 as CLS_DASH  with imut = 5;   // - _ ~
+let is i64 as CLS_PUNCT with imut = 6;   // % ? & = # : + , ; @
+let is i64 as CLS_OTHER with imut = 7;   // everything else, including non-ASCII
+
+fn cls(c as i64) as i64 {
+    if (c >= 97 && c <= 122) { return CLS_LOWER; }
+    if (c >= 65 && c <= 90)  { return CLS_UPPER; }
+    if (c >= 48 && c <= 57)  { return CLS_DIGIT; }
+    if (c == 47) { return CLS_SLASH; }
+    if (c == 46) { return CLS_DOT; }
+    if (c == 45) { return CLS_DASH; }    // -
+    if (c == 95) { return CLS_DASH; }    // _
+    if (c == 126) { return CLS_DASH; }   // ~
+    if (c == 37) { return CLS_PUNCT; }   // %
+    if (c == 63) { return CLS_PUNCT; }   // ?
+    if (c == 38) { return CLS_PUNCT; }   // &
+    if (c == 61) { return CLS_PUNCT; }   // =
+    if (c == 35) { return CLS_PUNCT; }   // #
+    if (c == 58) { return CLS_PUNCT; }   // :
+    if (c == 43) { return CLS_PUNCT; }   // +
+    if (c == 44) { return CLS_PUNCT; }   // ,
+    if (c == 59) { return CLS_PUNCT; }   // ;
+    if (c == 64) { return CLS_PUNCT; }   // @
+    return CLS_OTHER;
+}
+
+// ── region: the mode bit ─────────────────────────────────────────────
+// One slot. Structural or raw. Only raw exists so far, so the trained
+// probability will sit near certainty and cost almost nothing — which is the
+// point of coding it now rather than adding it later and breaking the format.
+let is i64 as CTX_MODE with imut = 0;
+let is i64 as MODE_N   with imut = 1;
+
+// ── region: the length ───────────────────────────────────────────────
+// A four-bit tree over the bit-length of the URL, then that many raw low bits.
+// Sixteen slots covers lengths up to MAX_URL with room to spare.
+//
+// An explicit length rather than a terminator symbol, and the reason is the
+// redirect server rather than the ratio. The decoder is handed bytes chosen by
+// whoever typed the link; a length it reads up front and bounds immediately
+// cannot run away, where a terminator that never arrives can.
+let is i64 as CTX_LEN  with imut = 1;
+let is i64 as LEN_BITS with imut = 4;
+let is i64 as LEN_N    with imut = 16;
+
+// ── region: the character model ──────────────────────────────────────
+let is i64 as CHAR_TREE with imut = 256;          // an 8-bit tree per context
+let is i64 as CHAR_CTX  with imut = 2048;         // 256 previous bytes x NCLASS
+let is i64 as CTX_CHAR  with imut = 17;           // CTX_LEN + LEN_N
+let is i64 as CHAR_N    with imut = 524288;       // CHAR_CTX * CHAR_TREE
+
+// The whole array.
+let is i64 as NPROBS with imut = 524305;          // CTX_CHAR + CHAR_N
+
+// Sentinel for "there is no previous byte". 0 is safe: a NUL cannot appear in
+// a URL that reached us as a NUL-terminated string, so the start-of-string
+// context is never confused with a real one.
+let is i64 as NOPREV with imut = 0;
+
+// Base of the tree predicting the next byte, given the two before it.
+fn char_base(p1 as i64, p2 as i64) as i64 {
+    return CTX_CHAR + ((p1 * NCLASS) + cls(p2)) * CHAR_TREE;
+}
+
+// Number of significant bits in v. bitlen(0) is 0, bitlen(1) is 1,
+// bitlen(8192) is 14 — which is why LEN_BITS is 4 and not 3.
+fn bitlen(v as i64) as i64 {
+    let is i64 as n with mut = 0;
+    let is i64 as x with mut = v;
+    while (x > 0) { n = n + 1; x = x >> 1; }
+    return n;
+}

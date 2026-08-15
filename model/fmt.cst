@@ -1,0 +1,303 @@
+// =======================================================
+// model/fmt.cst — the model file, and the promise that it has not moved.
+//
+// A model is a header, a section table, and sections. Today the only section
+// is the probability array; the dictionaries and per-site profiles the grammar
+// layer will want are more sections, which is why there is a table at all
+// rather than a fixed layout.
+//
+// IMMUTABILITY IS THE REQUIREMENT. A link minted today has to resolve in ten
+// years, so a published model id is frozen: never reassigned, never re-edited.
+// A new model gets a new id and the old one stays distributed. That is what
+// the content hash is for — not security, since a hostile model file means the
+// process is already lost, but the far likelier case of the wrong file, a
+// half-written copy, or a disk that rotted. A model whose hash does not match
+// is rejected outright rather than accepted with a warning: decoding a
+// permanent link against a model that silently changed produces a plausible
+// wrong URL, which is worse than an error by a wide margin.
+//
+// WHY VERIFYING IS SEPARATE FROM OPENING. The hash is O(file). At 90 MB that
+// is a tenth of a second and, worse, it touches every page. Opening therefore
+// does the structural checks — magic, version, section bounds — and callers
+// that are long-lived enough to afford the content check (the redirect server
+// at boot, `lnzip verify` on demand) ask for it explicitly.
+//
+// The file is read rather than mapped. Mapping is the obvious optimisation and
+// the design calls for it, but it is Linux-specific through std/os/linux and
+// the codec is meant to stay buildable for wasm32-wasi. At Tiny's ~1 MB the
+// difference is unmeasurable; it becomes worth taking when Max exists and the
+// benchmark says so, and it is contained inside model_open.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+use "./ctx.cst"         as ctx;
+use "../entropy/rc.cst" as rc;
+use "std/io.cst"        as io;
+use "std/mem.cst" only bins, core as mem;
+
+let is i64 as FMT_VER with imut = 1;
+
+let is i64 as TIER_TINY with imut = 0;
+let is i64 as TIER_STD  with imut = 1;
+let is i64 as TIER_MAX  with imut = 2;
+
+// The largest model id the payload can name in its three bits. Ids are
+// allocated at publication and never reused; running out is a format break,
+// which is what the escape in the payload grammar is reserved for.
+let is i64 as MAX_MODEL_ID with imut = 7;
+
+let is i64 as SEC_PROBS with imut = 1;
+
+let is i64 as HDR_SIZE with imut = 32;
+let is i64 as SEC_SIZE with imut = 24;
+
+struct Model {
+    base   as *u8;
+    size   as i64;
+    owned  as i64;     // 1 when base must be unmapped by model_free
+
+    fmt_ver  as i64;
+    model_id as i64;
+    tier     as i64;
+
+    probs  as *u16;
+    nprobs as i64;
+}
+
+// Little-endian readers that assume nothing about alignment. The section table
+// happens to be aligned, but a format read byte-wise is a format that does not
+// acquire a silent dependency on the writer's padding.
+fn _rd16(p as *u8, at as i64) as i64 {
+    return cast(i64, p[at]) | (cast(i64, p[at + 1]) << 8);
+}
+fn _rd32(p as *u8, at as i64) as i64 {
+    return _rd16(p, at) | (_rd16(p, at + 2) << 16);
+}
+fn _rd64(p as *u8, at as i64) as i64 {
+    return _rd32(p, at) | (_rd32(p, at + 4) << 32);
+}
+fn _wr16(p as *u8, at as i64, v as i64) as void {
+    p[at]     = cast(u8, v & 0xFF);
+    p[at + 1] = cast(u8, (v >> 8) & 0xFF);
+}
+fn _wr32(p as *u8, at as i64, v as i64) as void {
+    _wr16(p, at, v & 0xFFFF);
+    _wr16(p, at + 2, (v >> 16) & 0xFFFF);
+}
+fn _wr64(p as *u8, at as i64, v as i64) as void {
+    _wr32(p, at, v & 0xFFFFFFFF);
+    _wr32(p, at + 4, (v >> 32) & 0xFFFFFFFF);
+}
+
+// FNV-1a, 64-bit, over the file with its own hash field skipped. Wrapping
+// multiplication is deterministic in Caustic, which is the property that
+// matters: the same bytes must hash the same on any machine that will ever
+// resolve one of these links.
+let is i64 as _FNV_PRIME with imut = 1099511628211;
+
+fn _fnv_start() as i64 {
+    return (0xcbf29ce4 << 32) | 0x84222325;
+}
+fn _fnv_run(h0 as i64, p as *u8, from as i64, to as i64) as i64 {
+    let is i64 as h with mut = h0;
+    let is i64 as i with mut = from;
+    while (i < to) {
+        h = h ^ cast(i64, p[i]);
+        h = h * _FNV_PRIME;
+        i = i + 1;
+    }
+    return h;
+}
+
+// Everything except the eight bytes the hash itself occupies.
+fn _content_hash(p as *u8, size as i64) as i64 {
+    let is i64 as h with mut = _fnv_start();
+    h = _fnv_run(h, p, 0, 16);
+    h = _fnv_run(h, p, 24, size);
+    return h;
+}
+
+fn _find_section(m as *Model, want as i64, off as *i64, len as *i64) as i64 {
+    let is i64 as n = _rd32(m.base, 12);
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        let is i64 as at = HDR_SIZE + i * SEC_SIZE;
+        if (_rd32(m.base, at) == want) {
+            off[0] = _rd64(m.base, at + 8);
+            len[0] = _rd64(m.base, at + 16);
+            return 0;
+        }
+        i = i + 1;
+    }
+    return errno.E_BADMODEL;
+}
+
+// Structural validation. Everything here is O(1) or O(sections); nothing walks
+// the payload, so opening a 90 MB model stays cheap.
+fn _parse(m as *Model) as i64 {
+    if (m.size < HDR_SIZE) { return errno.E_BADMODEL; }
+    if (m.base[0] != 76) { return errno.E_BADMODEL; }    // L
+    if (m.base[1] != 78) { return errno.E_BADMODEL; }    // N
+    if (m.base[2] != 90) { return errno.E_BADMODEL; }    // Z
+    if (m.base[3] != 77) { return errno.E_BADMODEL; }    // M
+
+    m.fmt_ver  = _rd16(m.base, 4);
+    m.model_id = _rd16(m.base, 6);
+    m.tier     = cast(i64, m.base[8]);
+
+    if (m.fmt_ver != FMT_VER)        { return errno.E_BADMODEL; }
+    if (m.model_id > MAX_MODEL_ID)   { return errno.E_BADMODEL; }
+
+    let is i64 as nsec = _rd32(m.base, 12);
+    if (nsec < 1)    { return errno.E_BADMODEL; }
+    if (nsec > 64)   { return errno.E_BADMODEL; }
+    if (HDR_SIZE + nsec * SEC_SIZE > m.size) { return errno.E_BADMODEL; }
+
+    // Every section must lie inside the file. Checked before anything is read
+    // through them, because these offsets come off disk and the redirect
+    // server runs this on whatever it was given.
+    let is i64 as i with mut = 0;
+    while (i < nsec) {
+        let is i64 as at = HDR_SIZE + i * SEC_SIZE;
+        let is i64 as off = _rd64(m.base, at + 8);
+        let is i64 as len = _rd64(m.base, at + 16);
+        if (off < HDR_SIZE)        { return errno.E_BADMODEL; }
+        if (len < 0)               { return errno.E_BADMODEL; }
+        if (off > m.size)          { return errno.E_BADMODEL; }
+        if (off + len > m.size)    { return errno.E_BADMODEL; }
+        i = i + 1;
+    }
+
+    let is [1]i64 as poff;
+    let is [1]i64 as plen;
+    let is i64 as rc0 = _find_section(m, SEC_PROBS, cast(*i64, &poff), cast(*i64, &plen));
+    if (rc0 != 0) { return rc0; }
+    if (plen[0] != ctx.NPROBS * 2) { return errno.E_BADMODEL; }
+
+    m.probs  = cast(*u16, cast(i64, m.base) + poff[0]);
+    m.nprobs = ctx.NPROBS;
+    return 0;
+}
+
+fn model_open(m as *Model, path as *u8) as i64 {
+    m.base = cast(*u8, 0);
+    m.owned = 0;
+
+    let is i64 as size = io.file_size(path);
+    if (size <= 0) { return errno.E_IO; }
+
+    let is *u8 as buf = mem.core.mmap_anon(size);
+    if (cast(i64, buf) <= 0) { return errno.E_OOM; }
+
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { mem.core.munmap(buf, size); return errno.E_IO; }
+    let is i64 as got with mut = 0;
+    while (got < size) {
+        let is i64 as n = io._read_fd(fd, cast(*u8, cast(i64, buf) + got), size - got);
+        if (n <= 0) { break; }
+        got = got + n;
+    }
+    io._close_fd(fd);
+    if (got != size) { mem.core.munmap(buf, size); return errno.E_IO; }
+
+    m.base = buf;
+    m.size = size;
+    m.owned = 1;
+    let is i64 as rc0 = _parse(m);
+    if (rc0 != 0) { mem.core.munmap(buf, size); m.base = cast(*u8, 0); m.owned = 0; }
+    return rc0;
+}
+
+// The O(file) check, on request. Callers that resolve permanent links should
+// run it once at start-up; nothing that runs per URL should run it at all.
+fn model_verify(m as *Model) as i64 {
+    if (cast(i64, m.base) == 0) { return errno.E_BADMODEL; }
+    if (_content_hash(m.base, m.size) != _rd64(m.base, 16)) { return errno.E_BADMODEL; }
+    return 0;
+}
+
+// A model with no statistics in it: every probability one half, so every bit
+// costs exactly one bit and the codec is an expensive identity function.
+//
+// It exists so the codec runs before a corpus does, and so a failure to load a
+// real model degrades to "no compression" instead of "no service". The id is 0
+// and it is not a publishable model — it is what the trainer starts from.
+fn model_builtin(m as *Model) as i64 {
+    let is i64 as bytes_needed = ctx.NPROBS * 2;
+    let is *u8 as buf = mem.core.mmap_anon(bytes_needed);
+    if (cast(i64, buf) <= 0) { return errno.E_OOM; }
+
+    let is *u16 as p = cast(*u16, buf);
+    let is i64 as i with mut = 0;
+    while (i < ctx.NPROBS) {
+        p[i] = cast(u16, rc.PROB_HALF);
+        i = i + 1;
+    }
+
+    m.base = buf;
+    m.size = bytes_needed;
+    m.owned = 1;
+    m.fmt_ver = FMT_VER;
+    m.model_id = 0;
+    m.tier = TIER_TINY;
+    m.probs = p;
+    m.nprobs = ctx.NPROBS;
+    return 0;
+}
+
+fn model_free(m as *Model) as void {
+    if (m.owned == 1) {
+        if (cast(i64, m.base) > 0) { mem.core.munmap(m.base, m.size); }
+    }
+    m.base = cast(*u8, 0);
+    m.owned = 0;
+    m.probs = cast(*u16, 0);
+    m.nprobs = 0;
+}
+
+// Serialise a probability array as a model file. Written through
+// write_file_atomic — a half-written model that still parses is exactly the
+// failure the content hash exists to catch, and there is no reason to create
+// the opportunity.
+fn model_write(path as *u8, model_id as i64, tier as i64, probs as *u16) as i64 {
+    if (model_id < 0)            { return errno.E_BADMODEL; }
+    if (model_id > MAX_MODEL_ID) { return errno.E_BADMODEL; }
+
+    let is i64 as poff = HDR_SIZE + SEC_SIZE;          // one section
+    let is i64 as plen = ctx.NPROBS * 2;
+    let is i64 as size = poff + plen;
+
+    let is *u8 as f = mem.core.mmap_anon(size);
+    if (cast(i64, f) <= 0) { return errno.E_OOM; }
+
+    f[0] = cast(u8, 76); f[1] = cast(u8, 78); f[2] = cast(u8, 90); f[3] = cast(u8, 77);
+    _wr16(f, 4, FMT_VER);
+    _wr16(f, 6, model_id);
+    f[8] = cast(u8, tier);
+    f[9] = cast(u8, 0); f[10] = cast(u8, 0); f[11] = cast(u8, 0);
+    _wr32(f, 12, 1);
+    _wr64(f, 16, 0);                                    // hash, filled in below
+    _wr64(f, 24, 0);
+
+    _wr32(f, HDR_SIZE, SEC_PROBS);
+    _wr32(f, HDR_SIZE + 4, 0);
+    _wr64(f, HDR_SIZE + 8, poff);
+    _wr64(f, HDR_SIZE + 16, plen);
+
+    // The probabilities go out clamped. The coder clamps too, so this changes
+    // no output — but it means the file on disk says what the codec will
+    // actually do, rather than something the reader has to know to correct.
+    let is *u16 as dst = cast(*u16, cast(i64, f) + poff);
+    let is i64 as i with mut = 0;
+    while (i < ctx.NPROBS) {
+        dst[i] = cast(u16, rc.clamp(cast(i64, probs[i])));
+        i = i + 1;
+    }
+
+    _wr64(f, 16, _content_hash(f, size));
+
+    let is i64 as w = io.write_file_atomic(path, f, size);
+    mem.core.munmap(f, size);
+    if (w < 0) { return errno.E_IO; }
+    return size;
+}

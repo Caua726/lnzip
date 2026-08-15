@@ -11,3 +11,7 @@
 use "core/errno.cst" as errno;
 use "url/split.cst"  as split;
 use "entropy/rc.cst" as rc;
+use "model/ctx.cst"  as ctx;
+use "model/fmt.cst"  as modelfmt;
+use "codec/codec.cst" as codec;
+use "train/count.cst" as counting;

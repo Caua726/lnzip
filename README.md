@@ -68,12 +68,39 @@ thing a database cannot offer at any size: no state.
 
 The benchmark reports per category rather than hiding this in an average.
 
-## Status
+## Where it stands
 
-Early. See `docs/` for the design; the phases and their gates are tracked
-there. Nothing here is stable yet, and no model has been published — a model
-id, once published, is frozen forever, because a link minted today has to
-resolve in ten years.
+The envelope, the coder and the character model are in. The structural
+grammar — domains, path tokens, typed fields — is not, so what follows is the
+floor rather than the result.
+
+Measured on 14487 URLs held out of training (real browser history), each
+compressed on its own:
+
+| | total | of original | mean/URL |
+|---|---|---|---|
+| **lnzip** — order-2 character model, Tiny | 473469 | **64.5%** | 157.8 B |
+| brotli q11 — its static dictionary already holds URL fragments | 535185 | 72.9% | 178.4 B |
+| gzip -9 | 564381 | 76.9% | 188.1 B |
+| bzip2 -9 | 709828 | 96.7% | 236.6 B |
+
+That lead comes from one decision: the probabilities live in the model, not in
+the payload. A general compressor has to ship its own statistics with every
+sixty-byte string, and there is no room.
+
+Losslessness is gated on a corpus rather than on chosen examples — 144874 real
+URLs, every one round-tripping byte for byte, run again on every change:
+
+```sh
+caustic-mk build corpus && ./build/corpus <file-of-urls> [model.lnzm]
+```
+
+Training is byte-reproducible: same corpus, same trainer, same model. It has
+to be, because a published model id is frozen forever — a link minted today
+has to resolve in ten years. Nothing is published yet, and the format is still
+free to move.
+
+See `docs/design.md` for the phases and their gates.
 
 ## Build
 
