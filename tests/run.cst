@@ -168,6 +168,9 @@ fn main(argc as i64, argv as *u8) as i32 {
     // ── the substrate ─────────────────────────────────────────────
     fail = fail + cast(i64, run_case(ccp, "test_errno", "tests/test_errno.cst"));
 
+    // ── lossless segmentation, the foundation ─────────────────────
+    fail = fail + cast(i64, run_case(ccp, "test_split", "tests/test_split.cst"));
+
 
     if (fail == 0) { io.write_str(1, "all green\n"); return 0; }
     io.write_str(1, "FAILURES: "); io.write_int(1, fail); io.write_str(1, "\n");

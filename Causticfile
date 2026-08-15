@@ -30,6 +30,16 @@ target "run" {
     depend "caustic-compact" in "https://github.com/Caua726/caustic-compact" tag "v0.1.0"
 }
 
+// The corpus gate. Separate from the suite on purpose: the corpus is
+// gigabytes and lives outside the repository, so a suite that depended on it
+// would fail on a fresh clone for a reason unrelated to the code.
+//
+//   caustic-mk build corpus && ./build/corpus <file-of-urls>
+target "corpus" {
+    src "tools/corpus.cst"
+    out "build/corpus"
+    flags "-O1"
+}
 
 // ── Scripts ──────────────────────────────────────────────────────────
 

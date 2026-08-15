@@ -1,0 +1,214 @@
+// =======================================================
+// tests/test_split.cst — the splitter tiles its input, exactly.
+//
+// This is the foundation of the whole codec, and it has exactly one property
+// worth testing: the components it reports, laid back down with the delimiters
+// its flags say were there, reproduce the input byte for byte. Everything
+// above this file assumes it. If it leaks, links decode to the wrong page and
+// nothing else in the project can catch it.
+//
+// So every case below is checked three ways: the arithmetic tiling invariant,
+// a real rebuild compared byte by byte, and — for the cases where a component
+// boundary is the interesting part — the component itself.
+//
+// The list is adversarial on purpose. Percent-encoding case, empty-but-present
+// delimiters, IPv6 brackets, a userinfo containing '@', ports with leading
+// zeros, raw UTF-8, raw spaces, scheme-relative and schemeless input. These
+// are the shapes that a parser written to *understand* URLs quietly
+// normalises, and normalising is losing.
+//
+// Exit code is which check failed.
+// =======================================================
+
+use "../url/split.cst" as us;
+use "../core/errno.cst" as errno;
+use "std/io.cst"        as io;
+
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+
+// Compare a component against an expected literal.
+fn eq_at(src as *u8, off as i64, len as i64, expect as *u8) as i64 {
+    if (len != slen(expect)) { return 0; }
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        if (src[off + i] != expect[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+let is i64 as NCASE with imut = 39;
+
+fn urlcase(i as i64) as *u8 {
+    if (i ==  0) { return "https://wiki.archlinux.org/title/Arch_User_Repository#Frequently_asked_questions"; }
+    if (i ==  1) { return "https://github.com/torvalds/linux/issues/123"; }
+    if (i ==  2) { return "http://example.com"; }
+    if (i ==  3) { return "http://example.com/"; }
+    if (i ==  4) { return "https://example.com:8080/p"; }
+    if (i ==  5) { return "https://example.com:/p"; }              // ':' present, port empty
+    if (i ==  6) { return "https://example.com:080/p"; }           // leading zero must survive
+    if (i ==  7) { return "https://user:pw@example.com/p"; }
+    if (i ==  8) { return "https://user@ex@ample.com/p"; }         // last '@' wins
+    if (i ==  9) { return "https://[::1]:8080/p"; }
+    if (i == 10) { return "https://[2001:db8::1]/p"; }
+    if (i == 11) { return "http://example.com/a%2Fb"; }
+    if (i == 12) { return "http://example.com/a%2fb"; }            // must differ from the above
+    if (i == 13) { return "http://example.com/p?"; }               // '?' present, query empty
+    if (i == 14) { return "http://example.com/p#"; }               // '#' present, fragment empty
+    if (i == 15) { return "http://example.com/p?#"; }
+    if (i == 16) { return "http://example.com//double//slash"; }
+    if (i == 17) { return "http://example.com/p?a=1&b=2#frag"; }
+    if (i == 18) { return "HTTPS://EXAMPLE.COM/P"; }               // case is content
+    if (i == 19) { return "mailto:someone@example.com"; }          // scheme, no authority
+    if (i == 20) { return "mailto:a@b?subject=hi"; }
+    if (i == 21) { return "http:/single-slash"; }
+    if (i == 22) { return "http:"; }                               // nothing after the colon
+    if (i == 23) { return "//scheme-relative.com/p"; }
+    if (i == 24) { return "www.google.com/search?q=x"; }           // no scheme, dotted first segment
+    if (i == 25) { return "relative/path/here"; }                  // no scheme, no dot
+    if (i == 26) { return "/absolute/path"; }
+    if (i == 27) { return "data:text/plain;base64,SGVsbG8="; }
+    if (i == 28) { return "https://пример.рф/путь"; }              // raw UTF-8
+    if (i == 29) { return "https://example.com/a b"; }             // raw space
+    if (i == 30) { return "ftp://ftp.gnu.org/gnu/"; }
+    if (i == 31) { return "https://x.com/?utm_source=a&utm_medium=b&utm_campaign=c"; }
+    if (i == 32) { return "?query-only"; }
+    if (i == 33) { return "#frag-only"; }
+    if (i == 34) { return "a"; }
+    if (i == 35) { return "https://example.com/p?a=#b"; }
+    if (i == 36) { return "http://[::1]/"; }
+    if (i == 37) { return "http://h:80:90/p"; }                    // two colons, last one is the port
+    return "https://sub.domain.example.co.uk/deep/path/segments/here.html";
+}
+
+// The universal property. Returns 0 on success, or the failing sub-check.
+fn roundtrip(s as *u8, n as i64) as i64 {
+    let is us.Split as sp = us.url_split(s, n);
+    if (sp.ok != 0) { return 1; }
+    if (us.url_tiles(&sp) != 1) { return 2; }
+
+    let is [9000]u8 as out;
+    let is i64 as w = us.url_rebuild(&sp, cast(*u8, &out), 9000);
+    if (w != n) { return 3; }
+
+    let is i64 as i with mut = 0;
+    while (i < n) {
+        if (out[i] != s[i]) { return 4; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() as i32 {
+    // ── every case tiles and rebuilds ─────────────────────────────
+    let is i64 as i with mut = 0;
+    while (i < NCASE) {
+        let is *u8 as s = urlcase(i);
+        let is i64 as rc = roundtrip(s, slen(s));
+        if (rc != 0) {
+            io.write_str(io.STDERR, "case "); io.write_int(io.STDERR, i);
+            io.write_str(io.STDERR, " subcheck "); io.write_int(io.STDERR, rc);
+            io.write_str(io.STDERR, ": "); io.write_str(io.STDERR, s);
+            io.write_str(io.STDERR, "\n");
+            return 10 + cast(i32, rc);
+        }
+        i = i + 1;
+    }
+
+    // ── component boundaries, where they are the point ────────────
+    let is *u8 as a = "https://user:pw@example.com:8080/x/y?q=1#f";
+    let is us.Split as s1 = us.url_split(a, slen(a));
+    if (s1.ok != 0)                                             { return 20; }
+    if (eq_at(a, s1.scheme_off, s1.scheme_len, "https") == 0)    { return 21; }
+    if (eq_at(a, s1.user_off,   s1.user_len,   "user:pw") == 0)  { return 22; }
+    if (eq_at(a, s1.host_off,   s1.host_len,   "example.com") == 0) { return 23; }
+    if (eq_at(a, s1.port_off,   s1.port_len,   "8080") == 0)     { return 24; }
+    if (eq_at(a, s1.path_off,   s1.path_len,   "/x/y") == 0)     { return 25; }
+    if (eq_at(a, s1.query_off,  s1.query_len,  "q=1") == 0)      { return 26; }
+    if (eq_at(a, s1.frag_off,   s1.frag_len,   "f") == 0)        { return 27; }
+    if (s1.has_slashes != 1) { return 28; }
+    if (s1.has_host != 1)    { return 29; }
+
+    // An IPv6 literal keeps its brackets in the host component: they are part
+    // of the text, and a host that dropped them could not be laid back down.
+    let is *u8 as b = "https://[2001:db8::1]:443/p";
+    let is us.Split as s2 = us.url_split(b, slen(b));
+    if (eq_at(b, s2.host_off, s2.host_len, "[2001:db8::1]") == 0) { return 30; }
+    if (eq_at(b, s2.port_off, s2.port_len, "443") == 0)           { return 31; }
+
+    // Present-but-empty is not absent. Both of these have a delimiter and a
+    // zero-length component, and conflating them loses a character.
+    let is *u8 as c = "http://h/p?";
+    let is us.Split as s3 = us.url_split(c, slen(c));
+    if (s3.has_query != 1) { return 32; }
+    if (s3.query_len != 0) { return 33; }
+
+    let is *u8 as d = "http://h/p";
+    let is us.Split as s4 = us.url_split(d, slen(d));
+    if (s4.has_query != 0) { return 34; }
+
+    // The port colon with no digits after it, likewise.
+    let is *u8 as e = "http://h:/p";
+    let is us.Split as s5 = us.url_split(e, slen(e));
+    if (s5.has_port != 1) { return 35; }
+    if (s5.port_len != 0) { return 36; }
+
+    // No scheme, no slashes, dotted first segment: read as a host, because
+    // that is what someone pasting "www.google.com/x" into a form means.
+    let is *u8 as f = "www.google.com/search?q=x";
+    let is us.Split as s6 = us.url_split(f, slen(f));
+    if (s6.has_scheme != 0)                                     { return 37; }
+    if (s6.has_slashes != 0)                                    { return 38; }
+    if (s6.has_host != 1)                                       { return 39; }
+    if (eq_at(f, s6.host_off, s6.host_len, "www.google.com") == 0) { return 40; }
+
+    // Undotted, so it is a path and not a host. Still tiles either way — the
+    // flag records which reading was taken, so the rebuild is exact whichever
+    // one this is.
+    let is *u8 as g = "relative/path/here";
+    let is us.Split as s7 = us.url_split(g, slen(g));
+    if (s7.has_host != 0) { return 41; }
+    if (eq_at(g, s7.path_off, s7.path_len, "relative/path/here") == 0) { return 42; }
+
+    // A scheme with no authority puts everything after the colon in the path.
+    let is *u8 as h = "mailto:someone@example.com";
+    let is us.Split as s8 = us.url_split(h, slen(h));
+    if (eq_at(h, s8.scheme_off, s8.scheme_len, "mailto") == 0) { return 43; }
+    if (s8.has_slashes != 0)                                   { return 44; }
+    if (s8.has_host != 0)                                      { return 45; }
+    if (eq_at(h, s8.path_off, s8.path_len, "someone@example.com") == 0) { return 46; }
+
+    // ── percent-encoding case is content, not presentation ────────
+    let is *u8 as p1 = "http://h/a%2Fb";
+    let is *u8 as p2 = "http://h/a%2fb";
+    let is us.Split as sp1 = us.url_split(p1, slen(p1));
+    let is us.Split as sp2 = us.url_split(p2, slen(p2));
+    if (sp1.path_len != sp2.path_len) { return 47; }
+    // "/a%2Fb": offset 4 is the hex digit whose case the two inputs differ in.
+    if (p1[sp1.path_off + 4] == p2[sp2.path_off + 4]) { return 48; }   // 'F' vs 'f' survived
+
+    // ── a long URL, near the ceiling ──────────────────────────────
+    let is [9000]u8 as big;
+    let is i64 as bp with mut = 0;
+    let is *u8 as pre = "https://example.com/";
+    while (bp < slen(pre)) { big[bp] = pre[bp]; bp = bp + 1; }
+    while (bp < 4000) { big[bp] = cast(u8, 97 + (bp % 26)); bp = bp + 1; }   // 'a'..'z'
+    big[bp] = cast(u8, 0);
+    if (roundtrip(cast(*u8, &big), bp) != 0) { return 49; }
+
+    // ── the limits are errors, not truncations ────────────────────
+    if (us.url_split("", 0).ok != errno.E_BADURL)                       { return 50; }
+    if (us.url_split(cast(*u8, &big), us.MAX_URL + 1).ok != errno.E_BADURL) { return 51; }
+
+    // A rebuild that does not fit reports it rather than writing past the end.
+    let is us.Split as s9 = us.url_split(d, slen(d));
+    let is [4]u8 as tiny;
+    if (us.url_rebuild(&s9, cast(*u8, &tiny), 4) != errno.E_SPACE) { return 52; }
+
+    io.write_str(io.STDOUT, "split: 39 adversarial cases tile and rebuild byte-exact\n");
+    return 0;
+}

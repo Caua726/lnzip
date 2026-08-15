@@ -1,0 +1,388 @@
+// =======================================================
+// url/split.cst — lossless segmentation of a URL.
+//
+// Reports where each component sits in the caller's buffer and which
+// delimiters were present. It copies nothing, allocates nothing, and — this is
+// the whole point — transforms nothing. No lowercasing, no percent-decoding,
+// no dot-segment removal, no filling in a default port. Every one of those is
+// a normalisation, and a normalisation is a loss: `%2F` and `%2f` name the
+// same byte but are not the same URL, and a link that decodes to the other one
+// is a wrong link.
+//
+// The contract is stronger than "parses". The components plus the delimiters
+// the flags claim must TILE the input: no gap, no overlap, nothing dropped.
+// url_tiles() checks that arithmetically, url_split() runs it on its own
+// output before returning, and url_rebuild() lays the tiles back down. A
+// splitter bug therefore surfaces as E_DESYNC at encode time rather than as a
+// URL that silently rebuilds wrong.
+//
+// This is why caustic-net's proto/url.cst is not used here despite being a
+// perfectly good RFC 3986 parser. It has no port_off/port_len — only a
+// resolved `port as i64` with the scheme default already substituted — so
+// "http://h" and "http://h:80" come back indistinguishable. It also requires a
+// literal "://", which rejects mailto: and schemeless input that this codec
+// still has to represent. Its edge-case handling informed the code below.
+//
+// Nothing here fails on real input. A string that makes no sense as a URL
+// still tiles, as a path of itself; only an empty buffer or one past MAX_URL
+// is an error. The grammar layer above decides whether the structure it found
+// is worth using or whether raw mode is cheaper.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+
+// The ceiling on anything this codec will look at. The redirect server feeds
+// attacker-controlled bytes straight in, so the bound exists to be hit, and
+// hitting it is an error rather than a truncation — a truncated URL is a valid
+// URL pointing somewhere else.
+let is i64 as MAX_URL with imut = 8192;
+
+let is i64 as _COLON with imut = 58;   // :
+let is i64 as _SLASH with imut = 47;   // /
+let is i64 as _AT    with imut = 64;   // @
+let is i64 as _QUEST with imut = 63;   // ?
+let is i64 as _HASH  with imut = 35;   // #
+let is i64 as _LBRK  with imut = 91;   // [
+let is i64 as _RBRK  with imut = 93;   // ]
+let is i64 as _DOT   with imut = 46;   // .
+
+struct Split {
+    ok  as i64;      // 0, or E_BADURL
+    src as *u8;      // the buffer the offsets index into; it must outlive this
+    len as i64;
+
+    // Which delimiters were literally present. Each is independent of the
+    // component length beside it: "?" with nothing after it is has_query = 1
+    // and query_len = 0, which is a different string from no "?" at all.
+    has_scheme  as i64;   // scheme text followed by ':'
+    has_slashes as i64;   // the "//" introducing an authority
+    has_host    as i64;   // a host component exists
+    has_user    as i64;   // userinfo followed by '@'
+    has_port    as i64;   // ':' before the port, even with no digits after it
+    has_query   as i64;   // '?'
+    has_frag    as i64;   // '#'
+
+    scheme_off as i64;  scheme_len as i64;   // without the ':'
+    user_off   as i64;  user_len   as i64;   // without the '@'; may contain ':'
+    host_off   as i64;  host_len   as i64;   // WITH the brackets, for IPv6
+    port_off   as i64;  port_len   as i64;   // the digits as written, "080" and all
+    path_off   as i64;  path_len   as i64;   // including its leading '/'
+    query_off  as i64;  query_len  as i64;   // without the '?'
+    frag_off   as i64;  frag_len   as i64;   // without the '#'
+}
+
+// Bounds-checked byte read: -1 for anything outside [0, n). Every lookahead in
+// this file goes through it, so none of them depends on the input being
+// NUL-terminated or on && short-circuiting.
+fn _b(s as *u8, i as i64, n as i64) as i64 {
+    if (i < 0)  { return 0 - 1; }
+    if (i >= n) { return 0 - 1; }
+    return cast(i64, s[i]);
+}
+
+fn _is_alpha(c as i64) as i64 {
+    if (c >= 65 && c <= 90)  { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    return 0;
+}
+
+fn _is_scheme_char(c as i64) as i64 {
+    if (_is_alpha(c) == 1)   { return 1; }
+    if (c >= 48 && c <= 57)  { return 1; }
+    if (c == 43) { return 1; }    // +
+    if (c == 45) { return 1; }    // -
+    if (c == 46) { return 1; }    // .
+    return 0;
+}
+
+fn _clear(sp as *Split) as void {
+    sp.ok = 0;
+    sp.has_scheme = 0;  sp.has_slashes = 0;  sp.has_host = 0;  sp.has_user = 0;
+    sp.has_port = 0;    sp.has_query = 0;    sp.has_frag = 0;
+    sp.scheme_off = 0;  sp.scheme_len = 0;
+    sp.user_off = 0;    sp.user_len = 0;
+    sp.host_off = 0;    sp.host_len = 0;
+    sp.port_off = 0;    sp.port_len = 0;
+    sp.path_off = 0;    sp.path_len = 0;
+    sp.query_off = 0;   sp.query_len = 0;
+    sp.frag_off = 0;    sp.frag_len = 0;
+}
+
+// The tiling invariant, checked by walking the input the way a rebuild would.
+// Returns 1 when the components and the claimed delimiters account for every
+// byte exactly once, 0 otherwise.
+fn url_tiles(sp as *Split) as i64 {
+    let is *u8 as s = sp.src;
+    let is i64 as n = sp.len;
+    let is i64 as pos with mut = 0;
+
+    if (sp.has_scheme == 1) {
+        if (sp.scheme_off != 0) { return 0; }
+        pos = sp.scheme_len;
+        if (_b(s, pos, n) != _COLON) { return 0; }
+        pos = pos + 1;
+    }
+    if (sp.has_slashes == 1) {
+        if (_b(s, pos, n) != _SLASH)     { return 0; }
+        if (_b(s, pos + 1, n) != _SLASH) { return 0; }
+        pos = pos + 2;
+    }
+    if (sp.has_user == 1) {
+        if (sp.user_off != pos) { return 0; }
+        pos = pos + sp.user_len;
+        if (_b(s, pos, n) != _AT) { return 0; }
+        pos = pos + 1;
+    }
+    if (sp.has_host == 1) {
+        if (sp.host_off != pos) { return 0; }
+        pos = pos + sp.host_len;
+    }
+    if (sp.has_port == 1) {
+        if (_b(s, pos, n) != _COLON) { return 0; }
+        pos = pos + 1;
+        if (sp.port_off != pos) { return 0; }
+        pos = pos + sp.port_len;
+    }
+    if (sp.path_off != pos) { return 0; }
+    pos = pos + sp.path_len;
+
+    if (sp.has_query == 1) {
+        if (_b(s, pos, n) != _QUEST) { return 0; }
+        pos = pos + 1;
+        if (sp.query_off != pos) { return 0; }
+        pos = pos + sp.query_len;
+    }
+    if (sp.has_frag == 1) {
+        if (_b(s, pos, n) != _HASH) { return 0; }
+        pos = pos + 1;
+        if (sp.frag_off != pos) { return 0; }
+        pos = pos + sp.frag_len;
+    }
+    if (pos != n) { return 0; }
+    return 1;
+}
+
+fn url_split(src as *u8, len as i64) as Split {
+    let is Split as sp with mut;
+    _clear(&sp);
+    sp.src = src;
+    sp.len = len;
+
+    if (len <= 0)      { sp.ok = errno.E_BADURL; return sp; }
+    if (len > MAX_URL) { sp.ok = errno.E_BADURL; return sp; }
+
+    // Fragment first, then query. Both are found by scanning from the left,
+    // which is what RFC 3986 §3.4/3.5 mean by "the first occurrence": a '#'
+    // inside what looks like a query is the fragment delimiter, and a '?'
+    // inside what looks like a host still starts the query.
+    let is i64 as end with mut = len;
+
+    let is i64 as i with mut = 0;
+    while (i < end) {
+        if (_b(src, i, len) == _HASH) { break; }
+        i = i + 1;
+    }
+    if (i < end) {
+        sp.has_frag = 1;
+        sp.frag_off = i + 1;
+        sp.frag_len = end - (i + 1);
+        end = i;
+    }
+
+    i = 0;
+    while (i < end) {
+        if (_b(src, i, len) == _QUEST) { break; }
+        i = i + 1;
+    }
+    if (i < end) {
+        sp.has_query = 1;
+        sp.query_off = i + 1;
+        sp.query_len = end - (i + 1);
+        end = i;
+    }
+
+    // Scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":". The scan stops at
+    // any other byte, so a ':' that comes after a '/' — "foo/bar:baz" — is not
+    // reached and no scheme is claimed.
+    let is i64 as p with mut = 0;
+    if (_is_alpha(_b(src, 0, end)) == 1) {
+        let is i64 as j with mut = 1;
+        while (j < end) {
+            if (_is_scheme_char(_b(src, j, end)) == 0) { break; }
+            j = j + 1;
+        }
+        if (_b(src, j, end) == _COLON) {
+            sp.has_scheme = 1;
+            sp.scheme_off = 0;
+            sp.scheme_len = j;
+            p = j + 1;
+        }
+    }
+
+    // "//" introduces an authority, with or without a scheme in front of it.
+    if (_b(src, p, end) == _SLASH) {
+        if (_b(src, p + 1, end) == _SLASH) {
+            sp.has_slashes = 1;
+            sp.has_host = 1;
+            p = p + 2;
+        }
+    }
+
+    // Schemeless and slashless: "www.google.com/x" is what someone pasting
+    // into a form means by a host, and "relative/path" is not. The tell is a
+    // dot in the first segment. This is a guess, but never a lossy one — the
+    // flag records which reading was taken, so the rebuild is exact either
+    // way, and only the compression ratio is at stake.
+    if (sp.has_scheme == 0) {
+        if (sp.has_slashes == 0) {
+            let is i64 as seg with mut = 0;
+            let is i64 as dot with mut = 0;
+            while (seg < end) {
+                if (_b(src, seg, end) == _SLASH) { break; }
+                if (_b(src, seg, end) == _DOT)   { dot = 1; }
+                seg = seg + 1;
+            }
+            if (dot == 1) { sp.has_host = 1; }
+        }
+    }
+
+    if (sp.has_host == 1) {
+        // The authority runs to the next '/', or to the end of what is left.
+        let is i64 as a with mut = p;
+        while (a < end) {
+            if (_b(src, a, end) == _SLASH) { break; }
+            a = a + 1;
+        }
+
+        // Userinfo ends at the LAST '@' in the authority: a password may
+        // legally contain an encoded one, and real-world input contains raw
+        // ones.
+        let is i64 as at with mut = 0 - 1;
+        let is i64 as k with mut = p;
+        while (k < a) {
+            if (_b(src, k, end) == _AT) { at = k; }
+            k = k + 1;
+        }
+        if (at >= 0) {
+            sp.has_user = 1;
+            sp.user_off = p;
+            sp.user_len = at - p;
+            p = at + 1;
+        }
+
+        // Host and port. A bracketed IPv6 literal keeps its brackets — they
+        // are text, and a host that dropped them could not be laid back down —
+        // so the port colon is the one directly after the ']'. Otherwise the
+        // port is introduced by the last ':' in the authority, which is what
+        // makes "h:80:90" a host of "h:80" rather than a parse error.
+        let is i64 as hostend with mut = a;
+        if (_b(src, p, end) == _LBRK) {
+            let is i64 as br with mut = p;
+            while (br < a) {
+                if (_b(src, br, end) == _RBRK) { break; }
+                br = br + 1;
+            }
+            if (br < a) {
+                if (br + 1 < a) {
+                    if (_b(src, br + 1, end) == _COLON) {
+                        sp.has_port = 1;
+                        hostend = br + 1;
+                    }
+                }
+            }
+        } else {
+            let is i64 as c with mut = a - 1;
+            while (c >= p) {
+                if (_b(src, c, end) == _COLON) {
+                    sp.has_port = 1;
+                    hostend = c;
+                    break;
+                }
+                c = c - 1;
+            }
+        }
+
+        sp.host_off = p;
+        sp.host_len = hostend - p;
+        if (sp.has_port == 1) {
+            sp.port_off = hostend + 1;
+            sp.port_len = a - (hostend + 1);
+        }
+        p = a;
+    }
+
+    sp.path_off = p;
+    sp.path_len = end - p;
+
+    // Self-check. A splitter that miscounted would otherwise hand the grammar
+    // layer a structure that rebuilds into a different URL, and nothing
+    // downstream is in a position to notice.
+    if (url_tiles(&sp) == 0) { sp.ok = errno.E_DESYNC; }
+    return sp;
+}
+
+// How many bytes url_rebuild would write. Cheap enough to call first, which is
+// what lets the rebuild itself be a straight copy with no bounds test per byte.
+fn url_size(sp as *Split) as i64 {
+    let is i64 as n with mut = 0;
+    if (sp.has_scheme == 1)  { n = n + sp.scheme_len + 1; }
+    if (sp.has_slashes == 1) { n = n + 2; }
+    if (sp.has_user == 1)    { n = n + sp.user_len + 1; }
+    if (sp.has_host == 1)    { n = n + sp.host_len; }
+    if (sp.has_port == 1)    { n = n + sp.port_len + 1; }
+    n = n + sp.path_len;
+    if (sp.has_query == 1)   { n = n + sp.query_len + 1; }
+    if (sp.has_frag == 1)    { n = n + sp.frag_len + 1; }
+    return n;
+}
+
+fn _put(out as *u8, at as i64, src as *u8, off as i64, len as i64) as i64 {
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        out[at + i] = src[off + i];
+        i = i + 1;
+    }
+    return at + len;
+}
+
+// Lay the tiles back down. Returns the number of bytes written, or E_SPACE.
+// For a Split that came from url_split, this reproduces the input exactly;
+// that is the property the suite asserts on every case it has.
+fn url_rebuild(sp as *Split, out as *u8, max as i64) as i64 {
+    let is i64 as need = url_size(sp);
+    if (need > max) { return errno.E_SPACE; }
+
+    let is *u8 as s = sp.src;
+    let is i64 as w with mut = 0;
+
+    if (sp.has_scheme == 1) {
+        w = _put(out, w, s, sp.scheme_off, sp.scheme_len);
+        out[w] = cast(u8, _COLON); w = w + 1;
+    }
+    if (sp.has_slashes == 1) {
+        out[w] = cast(u8, _SLASH); w = w + 1;
+        out[w] = cast(u8, _SLASH); w = w + 1;
+    }
+    if (sp.has_user == 1) {
+        w = _put(out, w, s, sp.user_off, sp.user_len);
+        out[w] = cast(u8, _AT); w = w + 1;
+    }
+    if (sp.has_host == 1) {
+        w = _put(out, w, s, sp.host_off, sp.host_len);
+    }
+    if (sp.has_port == 1) {
+        out[w] = cast(u8, _COLON); w = w + 1;
+        w = _put(out, w, s, sp.port_off, sp.port_len);
+    }
+    w = _put(out, w, s, sp.path_off, sp.path_len);
+
+    if (sp.has_query == 1) {
+        out[w] = cast(u8, _QUEST); w = w + 1;
+        w = _put(out, w, s, sp.query_off, sp.query_len);
+    }
+    if (sp.has_frag == 1) {
+        out[w] = cast(u8, _HASH); w = w + 1;
+        w = _put(out, w, s, sp.frag_off, sp.frag_len);
+    }
+    return w;
+}

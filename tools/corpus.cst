@@ -1,0 +1,140 @@
+// =======================================================
+// tools/corpus.cst — run the round-trip gate over a real corpus.
+//
+//   caustic-mk build corpus && ./build/corpus <file-of-urls>
+//
+// One URL per line. For every line it splits, checks the tiling invariant,
+// rebuilds, and compares byte for byte. The design calls this the gate that
+// matters more than any other: a codec that is lossless on the forty cases
+// someone thought of is not lossless, and only a corpus of URLs nobody chose
+// says otherwise.
+//
+// It is deliberately not part of `caustic-mk run test`. The corpus lives
+// outside the repository — it is gigabytes and it is not source — so a suite
+// that depended on it would fail on a fresh clone for a reason that has
+// nothing to do with the code.
+//
+// Exit is 0 only if no line failed. Lines past MAX_URL are counted apart and
+// are not failures: the codec answers those in raw mode, which is a design
+// decision rather than a defect. This file grows a stage per phase; today it
+// gates the splitter.
+// =======================================================
+
+use "../url/split.cst"  as us;
+use "../core/errno.cst" as errno;
+use "std/io.cst"        as io;
+use "std/env.cst"       as env;
+use "std/mem.cst" only bins, core as mem;
+
+let is i64 as _NL with imut = 10;
+
+// How many failing lines to print before going quiet. Enough to see the shape
+// of a bug, few enough that a systematic break does not scroll the cause off
+// the screen.
+let is i64 as MAX_REPORT with imut = 20;
+
+fn _show(tag as *u8, src as *u8, off as i64, len as i64) as void {
+    io.write_str(io.STDERR, tag);
+    let is i64 as i with mut = 0;
+    while (i < len) {
+        let is [2]u8 as ch;
+        ch[0] = src[off + i];
+        ch[1] = cast(u8, 0);
+        io.write_str(io.STDERR, cast(*u8, &ch));
+        i = i + 1;
+    }
+    io.write_str(io.STDERR, "\n");
+}
+
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);
+    if (env.argc() < 2) {
+        io.write_str(io.STDERR, "usage: corpus <file-of-urls>\n");
+        return 2;
+    }
+    let is *u8 as path = env.argv(1);
+
+    let is i64 as size = io.file_size(path);
+    if (size <= 0) {
+        io.write_str(io.STDERR, "cannot size: "); io.write_str(io.STDERR, path);
+        io.write_str(io.STDERR, "\n");
+        return 2;
+    }
+
+    let is *u8 as buf = mem.core.mmap_anon(size + 1);
+    if (cast(i64, buf) <= 0) { return 3; }
+
+    let is i64 as fd = io._open_read(path);
+    if (fd < 0) { return 3; }
+    let is i64 as got with mut = 0;
+    while (got < size) {
+        let is i64 as n = io._read_fd(fd, cast(*u8, cast(i64, buf) + got), size - got);
+        if (n <= 0) { break; }
+        got = got + n;
+    }
+    io._close_fd(fd);
+
+    let is [9000]u8 as out;
+
+    let is i64 as lines   with mut = 0;
+    let is i64 as passed  with mut = 0;
+    let is i64 as oversz  with mut = 0;   // past MAX_URL: raw mode's job, not a failure
+    let is i64 as bad     with mut = 0;
+    let is i64 as shown   with mut = 0;
+
+    let is i64 as p with mut = 0;
+    while (p < got) {
+        let is i64 as e with mut = p;
+        while (e < got) {
+            if (cast(i64, buf[e]) == _NL) { break; }
+            e = e + 1;
+        }
+        let is i64 as len = e - p;
+        if (len > 0) {
+            lines = lines + 1;
+            let is *u8 as s = cast(*u8, cast(i64, buf) + p);
+            let is us.Split as sp = us.url_split(s, len);
+
+            if (sp.ok == errno.E_BADURL) {
+                oversz = oversz + 1;
+            } else {
+                let is i64 as fail with mut = 0;
+                if (sp.ok != 0)                  { fail = 1; }
+                if (us.url_tiles(&sp) != 1)      { fail = 2; }
+                if (fail == 0) {
+                    let is i64 as w = us.url_rebuild(&sp, cast(*u8, &out), 9000);
+                    if (w != len) { fail = 3; }
+                    else {
+                        let is i64 as i with mut = 0;
+                        while (i < len) {
+                            if (out[i] != s[i]) { fail = 4; i = len; }
+                            else { i = i + 1; }
+                        }
+                    }
+                }
+                if (fail == 0) { passed = passed + 1; }
+                else {
+                    bad = bad + 1;
+                    if (shown < MAX_REPORT) {
+                        shown = shown + 1;
+                        io.write_str(io.STDERR, "FAIL stage ");
+                        io.write_int(io.STDERR, fail);
+                        io.write_str(io.STDERR, " line ");
+                        io.write_int(io.STDERR, lines);
+                        _show(": ", s, 0, len);
+                    }
+                }
+            }
+        }
+        p = e + 1;
+    }
+
+    io.write_str(io.STDOUT, "corpus: ");   io.write_int(io.STDOUT, lines);
+    io.write_str(io.STDOUT, " lines, ");   io.write_int(io.STDOUT, passed);
+    io.write_str(io.STDOUT, " round-trip byte-exact, "); io.write_int(io.STDOUT, oversz);
+    io.write_str(io.STDOUT, " over MAX_URL (raw mode), "); io.write_int(io.STDOUT, bad);
+    io.write_str(io.STDOUT, " FAILED\n");
+
+    if (bad > 0) { return 1; }
+    return 0;
+}
