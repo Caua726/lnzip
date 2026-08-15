@@ -1,0 +1,197 @@
+// =======================================================
+// cli/main.cst — lnzip, at the command line.
+//
+//   lnzip encode <url>   [-m model.lnzm] [-u] [-v]
+//   lnzip decode <code>  [-m model.lnzm] [-u]
+//   lnzip info           [-m model.lnzm]
+//
+//   -m  the model to code against; $LNZIP_MODEL otherwise; the built-in
+//       uniform model as a last resort, which compresses nothing
+//   -u  Unicode output instead of Base64URL
+//   -v  report sizes on stderr
+//
+// The model is not optional in any meaningful sense — a payload is only
+// decodable against the model it was coded against, and the built-in one
+// exists so the tool runs before a corpus does, not so anyone ships links made
+// with it. Encoding against it says so on stderr.
+// =======================================================
+
+use "../core/errno.cst"  as errno;
+use "../model/fmt.cst"   as model;
+use "../model/ctx.cst"   as ctx;
+use "../codec/codec.cst" as codec;
+use "../fmt/b64url.cst"  as b64;
+use "../fmt/uni.cst"     as uni;
+use "../url/split.cst"   as us;
+use "caustic-compact/core/bytes.cst" as cb;
+use "std/io.cst"  as io;
+use "std/env.cst" as env;
+use "std/mem.cst" only bins, core as mem;
+
+fn slen(s as *u8) as i64 {
+    let is i64 as n with mut = 0;
+    while (s[n] != 0) { n = n + 1; }
+    return n;
+}
+
+fn streq(a as *u8, b as *u8) as i64 {
+    let is i64 as i with mut = 0;
+    while (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    if (a[i] == 0 && b[i] == 0) { return 1; }
+    return 0;
+}
+
+fn usage() as i32 {
+    io.write_str(io.STDERR, "usage:\n");
+    io.write_str(io.STDERR, "  lnzip encode <url>  [-m model.lnzm] [-u] [-v]\n");
+    io.write_str(io.STDERR, "  lnzip decode <code> [-m model.lnzm] [-u]\n");
+    io.write_str(io.STDERR, "  lnzip info          [-m model.lnzm]\n");
+    return 2;
+}
+
+fn fail(what as *u8, rc as i64) as i32 {
+    io.write_str(io.STDERR, what);
+    io.write_str(io.STDERR, ": ");
+    io.write_str(io.STDERR, errno.err_name(rc));
+    io.write_str(io.STDERR, "\n");
+    return 1;
+}
+
+fn main(argc as i64, argv as *u8) as i32 {
+    env.init(argc, argv);
+    if (env.argc() < 2) { return usage(); }
+
+    let is *u8 as cmd = env.argv(1);
+
+    let is *u8 as mpath with mut = cast(*u8, 0);
+    let is *u8 as arg   with mut = cast(*u8, 0);
+    let is i64 as want_uni with mut = 0;
+    let is i64 as verbose  with mut = 0;
+
+    let is i64 as i with mut = 2;
+    while (i < env.argc()) {
+        let is *u8 as a = env.argv(i);
+        if (streq(a, "-m") == 1) {
+            i = i + 1;
+            if (i >= env.argc()) { return usage(); }
+            mpath = env.argv(i);
+        }
+        else { if (streq(a, "-u") == 1) { want_uni = 1; }
+        else { if (streq(a, "-v") == 1) { verbose = 1; }
+        else {
+            if (cast(i64, arg) != 0) { return usage(); }
+            arg = a;
+        } } }
+        i = i + 1;
+    }
+    if (cast(i64, mpath) == 0) { mpath = env.getenv("LNZIP_MODEL"); }
+
+    // ── open a model ──────────────────────────────────────────────
+    let is model.Model as m with mut;
+    let is i64 as builtin with mut = 0;
+    if (cast(i64, mpath) != 0) {
+        let is i64 as rc0 = model.model_open(&m, mpath);
+        if (rc0 != 0) { return fail(mpath, rc0); }
+    } else {
+        if (model.model_builtin(&m) != 0) { return fail("built-in model", errno.E_OOM); }
+        builtin = 1;
+    }
+
+    // ── info ──────────────────────────────────────────────────────
+    if (streq(cmd, "info") == 1) {
+        io.write_str(io.STDOUT, "model      ");
+        if (builtin == 1) { io.write_str(io.STDOUT, "built-in (uniform, compresses nothing)\n"); }
+        else { io.write_str(io.STDOUT, mpath); io.write_str(io.STDOUT, "\n"); }
+        io.write_str(io.STDOUT, "format     "); io.write_int(io.STDOUT, m.fmt_ver);  io.write_str(io.STDOUT, "\n");
+        io.write_str(io.STDOUT, "id         "); io.write_int(io.STDOUT, m.model_id); io.write_str(io.STDOUT, "\n");
+        io.write_str(io.STDOUT, "tier       "); io.write_int(io.STDOUT, m.tier);     io.write_str(io.STDOUT, "\n");
+        io.write_str(io.STDOUT, "bytes      "); io.write_int(io.STDOUT, m.size);     io.write_str(io.STDOUT, "\n");
+        io.write_str(io.STDOUT, "contexts   "); io.write_int(io.STDOUT, m.nprobs);   io.write_str(io.STDOUT, "\n");
+        if (builtin == 0) {
+            io.write_str(io.STDOUT, "integrity  ");
+            if (model.model_verify(&m) == 0) { io.write_str(io.STDOUT, "ok\n"); }
+            else { io.write_str(io.STDOUT, "FAILED — this model has changed since it was written\n"); }
+        }
+        model.model_free(&m);
+        return 0;
+    }
+
+    if (cast(i64, arg) == 0) { return usage(); }
+
+    let is i64 as CAP with imut = 65536;
+    let is *u8 as textbuf = mem.core.mmap_anon(CAP);
+    if (cast(i64, textbuf) <= 0) { return fail("alloc", errno.E_OOM); }
+
+    // ── encode ────────────────────────────────────────────────────
+    if (streq(cmd, "encode") == 1) {
+        if (builtin == 1) {
+            io.write_str(io.STDERR,
+                "warning: no model given, using the built-in uniform one — this compresses nothing\n");
+        }
+        let is i64 as n = slen(arg);
+        let is cb.Bytes as pay with mut = cb.bytes_new(16384);
+        let is i64 as w = codec.lnz_encode(arg, n, &m, &pay);
+        if (w < 0) { return fail("encode", w); }
+
+        let is i64 as c with mut = 0;
+        if (want_uni == 1) { c = uni.uni_encode(pay.ptr, pay.len, textbuf, CAP); }
+        else               { c = b64.b64_encode(pay.ptr, pay.len, textbuf, CAP); }
+        if (c < 0) { return fail("encode", c); }
+
+        // A payload can legitimately be empty: a URL the model predicts almost
+        // perfectly carries under a bit of information, and the coder trims its
+        // zero tail. An empty code is not a usable link, so one character of
+        // zeros stands in — it decodes back to an empty payload, which is
+        // exactly what the coder wants.
+        if (c == 0) {
+            if (want_uni == 1) {
+                textbuf[0] = cast(u8, 0xE4); textbuf[1] = cast(u8, 0xB8); textbuf[2] = cast(u8, 0x80);
+                c = 3;
+            } else {
+                textbuf[0] = cast(u8, 65);   // 'A'
+                c = 1;
+            }
+        }
+
+        io.write_bytes(io.STDOUT, textbuf, c);
+        io.write_str(io.STDOUT, "\n");
+
+        if (verbose == 1) {
+            io.write_str(io.STDERR, "url ");        io.write_int(io.STDERR, n);
+            io.write_str(io.STDERR, " B -> payload "); io.write_int(io.STDERR, pay.len);
+            io.write_str(io.STDERR, " B -> ");
+            if (want_uni == 1) { io.write_int(io.STDERR, c / 3); io.write_str(io.STDERR, " unicode chars ("); io.write_int(io.STDERR, c); io.write_str(io.STDERR, " utf-8 bytes)\n"); }
+            else               { io.write_int(io.STDERR, c); io.write_str(io.STDERR, " base64url chars\n"); }
+        }
+
+        cb.bytes_free(&pay);
+        model.model_free(&m);
+        return 0;
+    }
+
+    // ── decode ────────────────────────────────────────────────────
+    if (streq(cmd, "decode") == 1) {
+        let is i64 as n = slen(arg);
+        let is *u8 as pay = mem.core.mmap_anon(CAP);
+        if (cast(i64, pay) <= 0) { return fail("alloc", errno.E_OOM); }
+
+        let is i64 as pn with mut = 0;
+        if (want_uni == 1) { pn = uni.uni_decode(arg, n, pay, CAP); }
+        else               { pn = b64.b64_decode(arg, n, pay, CAP); }
+        if (pn < 0) { return fail("decode", pn); }
+
+        let is i64 as d = codec.lnz_decode(pay, pn, &m, textbuf, us.MAX_URL);
+        if (d < 0) { return fail("decode", d); }
+
+        io.write_bytes(io.STDOUT, textbuf, d);
+        io.write_str(io.STDOUT, "\n");
+        model.model_free(&m);
+        return 0;
+    }
+
+    model.model_free(&m);
+    return usage();
+}

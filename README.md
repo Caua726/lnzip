@@ -102,6 +102,22 @@ free to move.
 
 See `docs/design.md` for the phases and their gates.
 
+## Use
+
+```sh
+caustic-mk build train && ./build/train <corpus> models/tiny.lnzm 0 0
+caustic-mk build lnzip
+
+./build/lnzip encode 'https://github.com/torvalds/linux/issues/123' -m models/tiny.lnzm
+./build/lnzip decode '<code>' -m models/tiny.lnzm
+./build/lnzip encode '<url>' -m models/tiny.lnzm -u     # Unicode output
+./build/lnzip info -m models/tiny.lnzm
+```
+
+`$LNZIP_MODEL` stands in for `-m`. With no model at all the tool still runs,
+against a uniform built-in one that compresses nothing — it exists so the codec
+works before a corpus does, and encoding with it says so on stderr.
+
 ## Build
 
 ```sh

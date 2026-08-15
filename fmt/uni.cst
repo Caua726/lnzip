@@ -1,0 +1,116 @@
+// =======================================================
+// fmt/uni.cst — the payload as the fewest characters a person will see.
+//
+// Fourteen bits a character, drawn from U+4E00..U+8DFF: the first 16384 CJK
+// Unified Ideographs. A 96-bit payload is sixteen Base64URL characters and
+// seven of these.
+//
+// WHY THIS BLOCK. The requirements are unglamorous and they eliminate almost
+// everything. Each codepoint must be a grapheme on its own, so no combining
+// marks. It must survive Unicode normalisation unchanged, so nothing with a
+// canonical decomposition — which is what rules out Hangul syllables, the
+// obvious way to reach 15 bits, since they decompose under NFD. It must not
+// reorder, so nothing bidirectional. It must be assigned, so a font has
+// something to draw. CJK Unified Ideographs satisfy all four across the whole
+// range, and there are enough of them.
+//
+// WHAT THE SAVING ACTUALLY IS. On the wire these characters are
+// percent-encoded — three bytes each, nine characters — so a Unicode code is
+// larger in bytes, not smaller. What shrinks is what a person sees and copies,
+// because browsers display and accept the decoded form. It is the right output
+// for a link that gets read aloud or pasted into a message, and the wrong one
+// for a link that gets embedded in a config file.
+//
+// ONE TRAILING ZERO BYTE. 14 and 8 share a factor of two, so ceil(8n/14)
+// characters carry either n or n+1 whole bytes, and the extra one is made of
+// the padding bits the encoder writes as zero. The range decoder reads zeros
+// past the end of its buffer by design, so a payload with a zero byte glued on
+// decodes identically. Callers get the original bytes possibly followed by one
+// zero, and nothing downstream can tell.
+// =======================================================
+
+use "../core/errno.cst" as errno;
+
+let is i64 as UNI_BITS  with imut = 14;
+let is i64 as UNI_COUNT with imut = 16384;    // 1 << 14
+let is i64 as UNI_BASE  with imut = 0x4E00;   // first CJK Unified Ideograph
+
+// Codepoints needed for n payload bytes.
+fn uni_chars(n as i64) as i64 {
+    return (n * 8 + UNI_BITS - 1) / UNI_BITS;
+}
+
+// UTF-8 bytes those codepoints occupy. Everything in this range is three.
+fn uni_size(n as i64) as i64 {
+    return uni_chars(n) * 3;
+}
+
+// Writes UTF-8. Returns bytes written, which is three times the number of
+// characters a reader will see.
+fn uni_encode(src as *u8, n as i64, out as *u8, max as i64) as i64 {
+    if (uni_size(n) > max) { return errno.E_SPACE; }
+
+    let is i64 as acc   with mut = 0;
+    let is i64 as nbits with mut = 0;
+    let is i64 as w     with mut = 0;
+    let is i64 as i     with mut = 0;
+
+    while (i < n) {
+        acc = (acc << 8) | cast(i64, src[i]);
+        nbits = nbits + 8;
+        while (nbits >= UNI_BITS) {
+            let is i64 as v = (acc >> (nbits - UNI_BITS)) & (UNI_COUNT - 1);
+            nbits = nbits - UNI_BITS;
+            let is i64 as cp = UNI_BASE + v;
+            out[w]     = cast(u8, 0xE0 | (cp >> 12));
+            out[w + 1] = cast(u8, 0x80 | ((cp >> 6) & 0x3F));
+            out[w + 2] = cast(u8, 0x80 | (cp & 0x3F));
+            w = w + 3;
+        }
+        i = i + 1;
+    }
+    if (nbits > 0) {
+        let is i64 as v = (acc << (UNI_BITS - nbits)) & (UNI_COUNT - 1);
+        let is i64 as cp = UNI_BASE + v;
+        out[w]     = cast(u8, 0xE0 | (cp >> 12));
+        out[w + 1] = cast(u8, 0x80 | ((cp >> 6) & 0x3F));
+        out[w + 2] = cast(u8, 0x80 | (cp & 0x3F));
+        w = w + 3;
+    }
+    return w;
+}
+
+// Reads UTF-8. Every sequence is validated for shape and for landing inside
+// the alphabet before it is used — this runs on request paths, where the input
+// is whatever arrived.
+fn uni_decode(src as *u8, n as i64, out as *u8, max as i64) as i64 {
+    let is i64 as acc   with mut = 0;
+    let is i64 as nbits with mut = 0;
+    let is i64 as w     with mut = 0;
+    let is i64 as i     with mut = 0;
+
+    while (i < n) {
+        if (i + 2 >= n) { return errno.E_BADCHAR; }
+        let is i64 as b0 = cast(i64, src[i]);
+        let is i64 as b1 = cast(i64, src[i + 1]);
+        let is i64 as b2 = cast(i64, src[i + 2]);
+        if ((b0 & 0xF0) != 0xE0) { return errno.E_BADCHAR; }
+        if ((b1 & 0xC0) != 0x80) { return errno.E_BADCHAR; }
+        if ((b2 & 0xC0) != 0x80) { return errno.E_BADCHAR; }
+
+        let is i64 as cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+        if (cp < UNI_BASE)                { return errno.E_BADCHAR; }
+        if (cp >= UNI_BASE + UNI_COUNT)   { return errno.E_BADCHAR; }
+
+        acc = (acc << UNI_BITS) | (cp - UNI_BASE);
+        nbits = nbits + UNI_BITS;
+        while (nbits >= 8) {
+            if (w >= max) { return errno.E_SPACE; }
+            out[w] = cast(u8, (acc >> (nbits - 8)) & 0xFF);
+            w = w + 1;
+            nbits = nbits - 8;
+        }
+        i = i + 3;
+    }
+    return w;
+}

@@ -45,6 +45,13 @@ target "corpus" {
     flags "-O1"
 }
 
+// The command line tool.
+target "lnzip" {
+    src "cli/main.cst"
+    out "build/lnzip"
+    flags "-O1"
+}
+
 // The trainer. Counts a corpus into a probability array and writes a model.
 //
 //   caustic-mk build train && ./build/train <corpus> <out.lnzm> [id] [tier]
