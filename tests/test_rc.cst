@@ -1,0 +1,257 @@
+// =======================================================
+// tests/test_rc.cst — the range coder is invertible, and it is efficient.
+//
+// Invertibility is the obvious property and the easy one. Efficiency is the
+// one that actually needs a test: a range coder with a sign error or a botched
+// renormalisation still round-trips perfectly while spending two bits where it
+// should spend one tenth of one, and nothing downstream would ever notice.
+// URLs are sixty bytes; a coder that wastes 20% is the difference between a
+// seven-character link and a nine-character one.
+//
+// So the middle test measures. It codes a known skewed source and compares the
+// bytes actually produced against the Shannon entropy of that source, computed
+// in fixed point because Caustic's printf has no %f and floats have no place
+// in a codec whose output has to reproduce a decade from now anyway.
+//
+// The last two tests cover the two edits made to LZMA's coder: the dropped
+// leading byte with the trimmed zero tail (which is what makes a tiny payload
+// tiny), and the promise that trimming never eats a caller's prefix.
+//
+// Exit code is which check failed.
+// =======================================================
+
+use "../entropy/rc.cst" as rc;
+use "caustic-compact/core/bytes.cst" as bytes;
+use "std/io.cst" as io;
+
+// A deterministic xorshift. std/random seeds from getrandom, which would make
+// a failure here unreproducible — exactly the wrong property for the test that
+// guards arithmetic.
+let is i64 as _rs with mut = 88172645463325252;
+fn rnd() as i64 {
+    let is i64 as x with mut = _rs;
+    x = x ^ ((x << 13) & 0x7FFFFFFFFFFFFFFF);
+    x = x ^ ((x >> 7) & 0x00FFFFFFFFFFFFFF);
+    x = x ^ ((x << 17) & 0x7FFFFFFFFFFFFFFF);
+    if (x == 0) { x = 88172645463325252; }
+    _rs = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+fn reseed() as void { _rs = 88172645463325252; }
+
+// log2(x) in Q16 fixed point, for x >= 1. Integer part by shifting, fraction
+// by the standard square-and-compare: y stays in [1,2) scaled by 2^16, and
+// each squaring peels off one more bit of the fraction. y < 2^17 so y*y < 2^34
+// and the multiply cannot overflow.
+fn log2_q16(x as i64) as i64 {
+    let is i64 as b with mut = 0;
+    let is i64 as v with mut = x;
+    while (v > 1) { v = v >> 1; b = b + 1; }
+
+    let is i64 as y with mut = (x << 16) >> b;
+    let is i64 as frac with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < 16) {
+        y = (y * y) >> 16;
+        frac = frac << 1;
+        if (y >= 131072) { y = y >> 1; frac = frac + 1; }
+        i = i + 1;
+    }
+    return (b << 16) + frac;
+}
+
+// Cost in Q16 bits of coding a symbol the model gives probability p/2048.
+fn cost_q16(p as i64) as i64 {
+    return (rc.PROB_BITS << 16) - log2_q16(p);
+}
+
+let is i64 as NBITS with imut = 40000;
+
+fn main() as i32 {
+    // ── 1. random probabilities, random bits, exact round-trip ────
+    //
+    // Probabilities drawn across the whole legal range, including the extremes
+    // where the multiply is most likely to lose a bit.
+    let is bytes.Bytes as buf with mut = bytes.bytes_new(65536);
+    let is rc.Enc as e with mut;
+    rc.enc_init(&e, &buf);
+
+    reseed();
+    let is i64 as i with mut = 0;
+    while (i < NBITS) {
+        let is i64 as p = rc.PROB_MIN + (rnd() % rc.PROB_MAX);
+        let is i64 as bit = rnd() & 1;
+        rc.enc_bit(&e, p, bit);
+        i = i + 1;
+    }
+    let is i64 as n1 = rc.enc_flush(&e);
+    if (n1 < 0) { return 1; }
+
+    let is rc.Dec as d with mut;
+    rc.dec_init(&d, buf.ptr, buf.len);
+    reseed();
+    i = 0;
+    while (i < NBITS) {
+        let is i64 as p = rc.PROB_MIN + (rnd() % rc.PROB_MAX);
+        let is i64 as want = rnd() & 1;
+        if (rc.dec_bit(&d, p) != want) { return 2; }
+        i = i + 1;
+    }
+    if (d.past > rc.PAST_OK) { return 3; }
+
+    // ── 2. the coder spends what the source costs ─────────────────
+    //
+    // A source that is 0 with probability 256/2048 and 1 otherwise, coded with
+    // a model that knows it. The ideal is 3 bits per zero and about 0.193 per
+    // one; anything more than a percent above that is a coder bug, and
+    // anything below is arithmetic that has stopped being reversible.
+    let is i64 as P with imut = 256;
+    bytes.bytes_reset(&buf);
+    rc.enc_init(&e, &buf);
+    reseed();
+    let is i64 as zeros with mut = 0;
+    let is i64 as ones  with mut = 0;
+    i = 0;
+    while (i < NBITS) {
+        let is i64 as bit with mut = 1;
+        if ((rnd() % rc.PROB_ONE) < P) { bit = 0; }
+        if (bit == 0) { zeros = zeros + 1; } else { ones = ones + 1; }
+        rc.enc_bit(&e, P, bit);
+        i = i + 1;
+    }
+    let is i64 as n2 = rc.enc_flush(&e);
+    if (n2 < 0) { return 4; }
+
+    let is i64 as ideal_q16 = zeros * cost_q16(P) + ones * cost_q16(rc.PROB_ONE - P);
+    let is i64 as actual_q16 = (n2 * 8) << 16;
+
+    io.write_str(io.STDOUT, "rc: ");     io.write_int(io.STDOUT, NBITS);
+    io.write_str(io.STDOUT, " bits -> "); io.write_int(io.STDOUT, n2);
+    io.write_str(io.STDOUT, " bytes, ideal ");
+    io.write_int(io.STDOUT, ideal_q16 >> 19);      // Q16 bits -> bytes
+    io.write_str(io.STDOUT, " bytes\n");
+
+    // Within 1%, plus 8 bytes of slack for the flush tail.
+    if (actual_q16 > (ideal_q16 / 100) * 101 + (64 << 16)) { return 5; }
+    // Below entropy is not efficiency, it is a decoder that will disagree.
+    if (actual_q16 * 100 < ideal_q16 * 99) { return 6; }
+
+    // ── 3. bit trees over a real probability table ────────────────
+    let is [256]u16 as probs;
+    reseed();
+    i = 0;
+    while (i < 256) {
+        probs[i] = cast(u16, rc.PROB_MIN + (rnd() % rc.PROB_MAX));
+        i = i + 1;
+    }
+    let is *u16 as pp = cast(*u16, &probs);
+
+    bytes.bytes_reset(&buf);
+    rc.enc_init(&e, &buf);
+    reseed();
+    i = 0;
+    while (i < 256) { let is i64 as _skip = rnd(); i = i + 1; }   // past the table draws
+    let is i64 as NSYM with imut = 5000;
+    i = 0;
+    while (i < NSYM) {
+        rc.enc_tree(&e, pp, 0, 8, rnd() & 0xFF);
+        i = i + 1;
+    }
+    if (rc.enc_flush(&e) < 0) { return 7; }
+
+    rc.dec_init(&d, buf.ptr, buf.len);
+    reseed();
+    i = 0;
+    while (i < 256) { let is i64 as _skip = rnd(); i = i + 1; }
+    i = 0;
+    while (i < NSYM) {
+        if (rc.dec_tree(&d, pp, 0, 8) != (rnd() & 0xFF)) { return 8; }
+        i = i + 1;
+    }
+
+    // ── 4. direct bits, interleaved with modelled ones ────────────
+    //
+    // Interleaved on purpose: direct bits touch range without touching a
+    // probability, and a renormalisation that is right in isolation can still
+    // be wrong at the seam between the two.
+    bytes.bytes_reset(&buf);
+    rc.enc_init(&e, &buf);
+    reseed();
+    i = 0;
+    while (i < 2000) {
+        rc.enc_bit(&e, 1900, rnd() & 1);
+        rc.enc_direct(&e, rnd() & 0xFFFF, 16);
+        rc.enc_bit(&e, 40, rnd() & 1);
+        i = i + 1;
+    }
+    if (rc.enc_flush(&e) < 0) { return 9; }
+
+    rc.dec_init(&d, buf.ptr, buf.len);
+    reseed();
+    i = 0;
+    while (i < 2000) {
+        if (rc.dec_bit(&d, 1900) != (rnd() & 1))          { return 10; }
+        if (rc.dec_direct(&d, 16) != (rnd() & 0xFFFF))    { return 11; }
+        if (rc.dec_bit(&d, 40) != (rnd() & 1))            { return 12; }
+        i = i + 1;
+    }
+
+    // ── 5. a tiny payload really is tiny ──────────────────────────
+    //
+    // The whole reason for dropping LZMA's leading zero byte and trimming the
+    // tail. Forty well-predicted bits carry about 2.9 bits of information; if
+    // this comes back as five or six bytes the flush is not doing its job and
+    // every link the codec ever mints is two characters longer than it needs
+    // to be.
+    bytes.bytes_reset(&buf);
+    rc.enc_init(&e, &buf);
+    i = 0;
+    while (i < 40) { rc.enc_bit(&e, 2000, 0); i = i + 1; }
+    let is i64 as small = rc.enc_flush(&e);
+    if (small < 0) { return 13; }
+    io.write_str(io.STDOUT, "rc: 40 skewed bits -> ");
+    io.write_int(io.STDOUT, small);
+    io.write_str(io.STDOUT, " bytes\n");
+    if (small > 2) { return 14; }
+
+    rc.dec_init(&d, buf.ptr, buf.len);
+    i = 0;
+    while (i < 40) {
+        if (rc.dec_bit(&d, 2000) != 0) { return 15; }
+        i = i + 1;
+    }
+
+    // ── 6. truncation is visible ──────────────────────────────────
+    bytes.bytes_reset(&buf);
+    rc.enc_init(&e, &buf);
+    reseed();
+    i = 0;
+    while (i < 4000) { rc.enc_bit(&e, 1024, rnd() & 1); i = i + 1; }
+    if (rc.enc_flush(&e) < 0) { return 16; }
+
+    rc.dec_init(&d, buf.ptr, buf.len / 2);
+    i = 0;
+    while (i < 4000) { let is i64 as _b = rc.dec_bit(&d, 1024); i = i + 1; }
+    if (d.past <= rc.PAST_OK) { return 17; }
+
+    // ── 7. the trim stops at the caller's prefix ──────────────────
+    //
+    // An all-zero stream trimmed without a floor would eat backwards into
+    // whatever the caller wrote before it. The codec writes a model id ahead
+    // of the coded bits, so this is not hypothetical.
+    bytes.bytes_reset(&buf);
+    bytes.bytes_push(&buf, cast(u8, 0xAB));
+    bytes.bytes_push(&buf, cast(u8, 0xCD));
+    rc.enc_init(&e, &buf);
+    i = 0;
+    while (i < 8) { rc.enc_bit(&e, 2047, 0); i = i + 1; }
+    let is i64 as body = rc.enc_flush(&e);
+    if (body < 0)                        { return 18; }
+    if (buf.len != 2 + body)             { return 19; }
+    if (cast(i64, buf.ptr[0]) != 0xAB)   { return 20; }
+    if (cast(i64, buf.ptr[1]) != 0xCD)   { return 21; }
+
+    bytes.bytes_free(&buf);
+    io.write_str(io.STDOUT, "rc: round-trips, hits entropy, trims to the floor\n");
+    return 0;
+}

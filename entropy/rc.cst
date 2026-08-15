@@ -1,0 +1,280 @@
+// =======================================================
+// entropy/rc.cst — binary range coder with frozen probabilities.
+//
+// Derived from the LZMA range coder in caustic-compact/formats/lzma.cst, with
+// two changes that matter and one that saves four bytes.
+//
+// FROZEN PROBABILITIES. LZMA adapts as it goes: every coded bit nudges its
+// probability by `p += (2048-p)>>5`. That is right for a megabyte of data and
+// wrong for a URL, which is over in sixty bytes — long before an adaptive
+// model has learned anything. Here the probabilities come pre-trained from the
+// model file and never move, so all the statistics are paid for once, offline,
+// and none of them ride in the payload. That is what makes a forty-bit result
+// possible: there is no table to transmit.
+//
+// PROBABILITIES ARE PASSED, NOT INDEXED. LZMA's coder owns its probs array;
+// this one takes the value. rc.cst therefore knows nothing about the model
+// format, is testable on its own with synthetic numbers, and the model layer
+// stays free to lay its tables out however it likes.
+//
+// NO LEADING ZERO BYTE, NO TRAILING ZERO BYTES. The LZMA stream begins with a
+// byte that is always zero — an artifact of the encoder's first cache flush —
+// and its decoder skips it. It also flushes five bytes at the end regardless
+// of how few are needed. Five wasted bytes is under one percent of a LZMA
+// stream and is 40 bits here, which is an entire URL. So the first byte is
+// dropped (it is provably zero: low + range never exceeds 2^32, so the first
+// shift cannot carry), the final value is rounded to the one with the most
+// trailing zero bits that still lies inside the coding interval, and trailing
+// zero bytes are trimmed. The decoder reads zeros past the end of the buffer
+// anyway, so a trimmed byte and a present zero byte are the same stream.
+//
+// PRECONDITION, CHECKED ELSEWHERE. Every probability must lie in 1..2047. A
+// zero or a full 2048 collapses the range and the coder stops being
+// invertible. It is not checked here — that would be two comparisons on the
+// hottest path in the codec, per bit — but once, over the whole array, when
+// the model file is loaded. A model that fails it is rejected outright.
+//
+// The arithmetic is integer throughout, deliberately. A link minted today has
+// to decode a decade from now on hardware that does not exist yet; a float
+// anywhere in this path would make that a hope rather than a guarantee.
+// =======================================================
+
+use "caustic-compact/core/bytes.cst" as bytes;
+use "../core/errno.cst"              as errno;
+
+// Probabilities are 11-bit, as in LZMA: `(range >> 11) * p` stays inside 32
+// bits for any range below 2^32, which is what keeps the multiply exact.
+let is i64 as PROB_BITS  with imut = 11;
+let is i64 as PROB_ONE   with imut = 2048;      // 1 << 11
+let is i64 as PROB_HALF  with imut = 1024;
+let is i64 as PROB_MIN   with imut = 1;
+let is i64 as PROB_MAX   with imut = 2047;
+
+let is i64 as _TOP  with imut = 16777216;       // 1 << 24, the renormalisation floor
+let is i64 as _MASK with imut = 4294967295;     // 0xFFFFFFFF
+
+// ===================== ENCODER =========================================
+
+struct Enc {
+    low        as i64;
+    range      as i64;
+    cache      as i64;
+    cache_size as i64;
+    out        as *bytes.Bytes;
+    start      as i64;   // out.len when coding began; the trim never goes below it
+    emitted    as i64;   // bytes actually pushed; the first is dropped
+    err        as i64;   // sticky: a push that could not allocate
+}
+
+fn enc_init(e as *Enc, out as *bytes.Bytes) as void {
+    e.low = 0;
+    e.range = _MASK;
+    e.cache = 0;
+    e.cache_size = 1;
+    e.out = out;
+    e.start = out.len;
+    e.emitted = 0;
+    e.err = 0;
+}
+
+// Push one byte, dropping the very first. That byte is the initial cache and
+// is always zero: the range coder maintains low + range <= 2^32, so `hi` is
+// zero on the first shift and the byte written is `cache + hi` = 0.
+fn _emit(e as *Enc, b as i64) as void {
+    e.emitted = e.emitted + 1;
+    if (e.emitted == 1) { return; }
+    if (bytes.bytes_push(e.out, cast(u8, b & 0xFF)) < 0) { e.err = errno.E_OOM; }
+}
+
+fn _shift_low(e as *Enc) as void {
+    let is i64 as hi = e.low >> 32;
+    if (hi != 0 || e.low < 0xFF000000) {
+        let is i64 as temp with mut = e.cache;
+        while (1 == 1) {
+            _emit(e, temp + hi);
+            temp = 0xFF;
+            e.cache_size = e.cache_size - 1;
+            if (e.cache_size == 0) { break; }
+        }
+        e.cache = (e.low >> 24) & 0xFF;
+    }
+    e.cache_size = e.cache_size + 1;
+    e.low = (e.low << 8) & _MASK;
+}
+
+// Code one bit. `p` is the probability that the bit is 0, out of PROB_ONE.
+fn enc_bit(e as *Enc, p as i64, bit as i64) as void {
+    let is i64 as bound = (e.range >> PROB_BITS) * p;
+    if (bit == 0) {
+        e.range = bound;
+    } else {
+        e.low = e.low + bound;
+        e.range = e.range - bound;
+    }
+    while (e.range < _TOP) {
+        e.range = (e.range << 8) & _MASK;
+        _shift_low(e);
+    }
+}
+
+// Code `nbits` raw bits, most significant first, at exactly one bit each. For
+// data the model has nothing to say about — the low bits of a random
+// identifier, where any prediction would be a lie that costs more than the
+// truth.
+fn enc_direct(e as *Enc, value as i64, nbits as i64) as void {
+    let is i64 as i with mut = nbits;
+    while (i > 0) {
+        i = i - 1;
+        e.range = (e.range >> 1) & _MASK;
+        let is i64 as bit = (value >> i) & 1;
+        if (bit != 0) { e.low = e.low + e.range; }
+        while (e.range < _TOP) {
+            e.range = (e.range << 8) & _MASK;
+            _shift_low(e);
+        }
+    }
+}
+
+// Code `value` through a binary tree of probabilities, most significant bit
+// first. `probs[base + 1 .. base + 2^nbits - 1]` is the tree; index 1 is the
+// root and a node's children are 2m and 2m+1, the standard LZMA layout.
+fn enc_tree(e as *Enc, probs as *u16, base as i64, nbits as i64, value as i64) as void {
+    let is i64 as m with mut = 1;
+    let is i64 as i with mut = nbits;
+    while (i > 0) {
+        i = i - 1;
+        let is i64 as bit = (value >> i) & 1;
+        enc_bit(e, cast(i64, probs[base + m]), bit);
+        m = (m << 1) + bit;
+    }
+}
+
+// Finish the stream in as few bytes as it can be finished in.
+//
+// Any value inside [low, low + range) decodes to the symbols just coded, so
+// pick the one with the most trailing zero bits: those bytes then trim away,
+// and the decoder — which reads zero past the end of the buffer — cannot tell
+// the difference. Returns the stream length, or a negative error.
+fn enc_flush(e as *Enc) as i64 {
+    let is i64 as top = e.low + e.range;
+
+    // Largest k with ceil(low / 2^k) * 2^k still below top. Walking k down
+    // from 32 finds it in at most 33 iterations and needs no division.
+    let is i64 as k with mut = 32;
+    while (k > 0) {
+        let is i64 as mask = (1 << k) - 1;
+        let is i64 as v = ((e.low + mask) >> k) << k;
+        if (v < top) { e.low = v; break; }
+        k = k - 1;
+    }
+
+    let is i64 as i with mut = 0;
+    while (i < 5) {
+        _shift_low(e);
+        i = i + 1;
+    }
+    if (e.err != 0) { return e.err; }
+
+    // Trim the zero tail. What is left is what the decoder needs; the rest it
+    // reconstructs by reading off the end. The floor is where this stream
+    // began, not zero — the caller may have written a prefix into the same
+    // buffer, and an all-zero stream would otherwise eat into it.
+    while (e.out.len > e.start) {
+        if (e.out.ptr[e.out.len - 1] != 0) { break; }
+        e.out.len = e.out.len - 1;
+    }
+    return e.out.len - e.start;
+}
+
+// ===================== DECODER =========================================
+
+struct Dec {
+    code  as i64;
+    range as i64;
+    src   as *u8;
+    len   as i64;
+    pos   as i64;
+    past  as i64;   // how many bytes have been read beyond the buffer
+}
+
+// The most zero bytes a well-formed stream can legitimately be short by. The
+// encoder trims its zero tail, and the decoder both loads four bytes up front
+// and runs one renormalisation ahead of the bit it is deciding, so reading off
+// the end is the normal case, not an error. Past this, the payload really was
+// cut: PAST_OK is the line, and the codec turns a crossing into E_TRUNC.
+let is i64 as PAST_OK with imut = 8;
+
+// Reads past the end yield zero rather than faulting, which is exactly the
+// stream the encoder would have written had it not trimmed. `past` counts
+// them so the codec can tell "trimmed" from "truncated" — a distinction the
+// coder itself has no way to make.
+fn _next(d as *Dec) as i64 {
+    let is i64 as b with mut = 0;
+    if (d.pos < d.len) { b = cast(i64, d.src[d.pos]); }
+    else { d.past = d.past + 1; }
+    d.pos = d.pos + 1;
+    return b;
+}
+
+fn dec_init(d as *Dec, src as *u8, len as i64) as void {
+    d.src = src;
+    d.len = len;
+    d.pos = 0;
+    d.past = 0;
+    d.code = 0;
+    d.range = _MASK;
+    // Four bytes, and no byte skipped: the encoder already dropped the zero
+    // one that LZMA's format leaves in.
+    let is i64 as i with mut = 0;
+    while (i < 4) {
+        d.code = ((d.code << 8) | _next(d)) & _MASK;
+        i = i + 1;
+    }
+}
+
+fn dec_bit(d as *Dec, p as i64) as i64 {
+    let is i64 as bound = (d.range >> PROB_BITS) * p;
+    let is i64 as bit with mut = 0;
+    if (d.code < bound) {
+        d.range = bound;
+    } else {
+        d.range = d.range - bound;
+        d.code = d.code - bound;
+        bit = 1;
+    }
+    while (d.range < _TOP) {
+        d.range = (d.range << 8) & _MASK;
+        d.code = ((d.code << 8) | _next(d)) & _MASK;
+    }
+    return bit;
+}
+
+fn dec_direct(d as *Dec, nbits as i64) as i64 {
+    let is i64 as res with mut = 0;
+    let is i64 as i with mut = 0;
+    while (i < nbits) {
+        d.range = (d.range >> 1) & _MASK;
+        let is i64 as bit with mut = 0;
+        if (d.code >= d.range) {
+            d.code = d.code - d.range;
+            bit = 1;
+        }
+        res = (res << 1) + bit;
+        while (d.range < _TOP) {
+            d.range = (d.range << 8) & _MASK;
+            d.code = ((d.code << 8) | _next(d)) & _MASK;
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+fn dec_tree(d as *Dec, probs as *u16, base as i64, nbits as i64) as i64 {
+    let is i64 as m with mut = 1;
+    let is i64 as i with mut = 0;
+    while (i < nbits) {
+        m = (m << 1) + dec_bit(d, cast(i64, probs[base + m]));
+        i = i + 1;
+    }
+    return m - (1 << nbits);
+}
