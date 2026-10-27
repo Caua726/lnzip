@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="372" viewBox="0 0 1280 372" role="img" aria-label="SIZE AFTER COMPRESSION, % OF ORIGINAL — LOWER IS BETTER">
+<title>SIZE AFTER COMPRESSION, % OF ORIGINAL — LOWER IS BETTER</title>
+<rect width="1280" height="372" rx="12" fill="#EEF0F5"/>
+<text x="60" y="50" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="2.5" >SIZE AFTER COMPRESSION, % OF ORIGINAL — LOWER IS BETTER</text>
+<line x1="530.0" y1="70" x2="530.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="530.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >0%</text>
+<line x1="635.0" y1="70" x2="635.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="635.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >20%</text>
+<line x1="740.0" y1="70" x2="740.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="740.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >40%</text>
+<line x1="845.0" y1="70" x2="845.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="845.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >60%</text>
+<line x1="950.0" y1="70" x2="950.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="950.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >80%</text>
+<line x1="1055.0" y1="70" x2="1055.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="1055.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >100%</text>
+<line x1="1160.0" y1="70" x2="1160.0" y2="294" stroke="#C9CEDB" stroke-width="1"/>
+<text x="1160.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#5A6178" text-anchor="middle" font-weight="400" letter-spacing="0" >120%</text>
+<text x="512" y="96" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#141726" text-anchor="end" font-weight="700" letter-spacing="0" >lnzip</text>
+<path d="M530,82 H688.75 Q692.75,82 692.75,86 V96 Q692.75,100 688.75,100 H530 Z" fill="#C25A05"/>
+<text x="702.75" y="96" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#141726" text-anchor="start" font-weight="700" letter-spacing="0" >31%</text>
+<text x="512" y="140" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="0" >zstd -19, dictionary trained on the same corpus</text>
+<path d="M530,126 H897.7 Q901.7,126 901.7,130 V140 Q901.7,144 897.7,144 H530 Z" fill="#8A91A6"/>
+<text x="911.7" y="140" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#141726" text-anchor="start" font-weight="400" letter-spacing="0" >70.8%</text>
+<text x="512" y="184" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="0" >brotli q11</text>
+<path d="M530,170 H929.725 Q933.725,170 933.725,174 V184 Q933.725,188 929.725,188 H530 Z" fill="#8A91A6"/>
+<text x="943.725" y="184" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#141726" text-anchor="start" font-weight="400" letter-spacing="0" >76.9%</text>
+<text x="512" y="228" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="0" >gzip -9</text>
+<path d="M530,214 H956.5 Q960.5,214 960.5,218 V228 Q960.5,232 956.5,232 H530 Z" fill="#8A91A6"/>
+<text x="970.5" y="228" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#141726" text-anchor="start" font-weight="400" letter-spacing="0" >82%</text>
+<text x="512" y="272" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="0" >bzip2 -9</text>
+<path d="M530,258 H1100.35 Q1104.35,258 1104.35,262 V272 Q1104.35,276 1100.35,276 H530 Z" fill="#8A91A6"/>
+<text x="1114.35" y="272" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#141726" text-anchor="start" font-weight="400" letter-spacing="0" >109.4%</text>
+<line x1="1055.0" y1="60" x2="1055.0" y2="294" stroke="#5A6178" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text x="1061.0" y="70" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="0" >original size</text>
+<text x="60" y="350" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="0" >Held-out URLs, earlier model trained on one person&#x27;s browsing. The published models score 34–35% on domains they never saw.</text>
+</svg>

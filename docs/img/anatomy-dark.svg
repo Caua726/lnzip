@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-label="Anatomy of a compressed URL: https://github.com/ costs 4 characters, torvalds 8, /linux 3, /issues 3, the query 14">
+<title>Anatomy of a compressed URL: https://github.com/ costs 4 characters, torvalds 8, /linux 3, /issues 3, the query 14</title>
+<rect width="1280" height="400" rx="12" fill="#12141C"/>
+<text x="60" y="52" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#8B93A8" text-anchor="start" font-weight="400" letter-spacing="2.5" >WHERE THE CHARACTERS GO</text>
+<text x="60" y="112" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="25" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" textLength="277.4" lengthAdjust="spacingAndGlyphs">https://github.com/</text>
+<text x="337.4" y="112" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="25" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" textLength="116.8" lengthAdjust="spacingAndGlyphs">torvalds</text>
+<text x="454.2" y="112" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="25" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" textLength="87.6" lengthAdjust="spacingAndGlyphs">/linux</text>
+<text x="541.8" y="112" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="25" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" textLength="102.2" lengthAdjust="spacingAndGlyphs">/issues</text>
+<text x="644.0" y="112" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="25" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" textLength="496.4" lengthAdjust="spacingAndGlyphs">?q=is%3Aopen&amp;utm_source=newsletter</text>
+<path d="M63,128 v8 H334.4 v-8" fill="none" stroke="#8B93A8" stroke-width="1.5"/>
+<text x="198.7" y="162" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="20" fill="#F0912F" text-anchor="middle" font-weight="700" letter-spacing="0" >+4</text>
+<text x="198.7" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >scheme + host</text>
+<path d="M340.4,128 v8 H451.2 v-8" fill="none" stroke="#8B93A8" stroke-width="1.5"/>
+<text x="395.79999999999995" y="162" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="20" fill="#F0912F" text-anchor="middle" font-weight="700" letter-spacing="0" >+8</text>
+<text x="395.79999999999995" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >path segment</text>
+<path d="M457.2,128 v8 H538.8 v-8" fill="none" stroke="#8B93A8" stroke-width="1.5"/>
+<text x="498.0" y="162" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="20" fill="#F0912F" text-anchor="middle" font-weight="700" letter-spacing="0" >+3</text>
+<text x="498.0" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >segment</text>
+<path d="M544.8,128 v8 H641.0 v-8" fill="none" stroke="#8B93A8" stroke-width="1.5"/>
+<text x="592.9" y="162" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="20" fill="#F0912F" text-anchor="middle" font-weight="700" letter-spacing="0" >+3</text>
+<text x="592.9" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >segment</text>
+<path d="M647.0,128 v8 H1137.4 v-8" fill="none" stroke="#8B93A8" stroke-width="1.5"/>
+<text x="892.2" y="162" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="20" fill="#F0912F" text-anchor="middle" font-weight="700" letter-spacing="0" >+14</text>
+<text x="892.2" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >query</text>
+<text x="60" y="254" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#8B93A8" text-anchor="start" font-weight="400" letter-spacing="0" >32 base64url characters, split by what they pay for</text>
+<rect x="60.0" y="268" width="143.0" height="16" rx="3" fill="#F0912F" fill-opacity="1.0"/>
+<text x="131.5" y="304" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#E7EAF2" text-anchor="middle" font-weight="400" letter-spacing="0" >4</text>
+<rect x="205.0" y="268" width="288.0" height="16" rx="3" fill="#F0912F" fill-opacity="0.62"/>
+<text x="349.0" y="304" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#E7EAF2" text-anchor="middle" font-weight="400" letter-spacing="0" >8</text>
+<rect x="495.0" y="268" width="106.8" height="16" rx="3" fill="#F0912F" fill-opacity="1.0"/>
+<text x="548.375" y="304" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#E7EAF2" text-anchor="middle" font-weight="400" letter-spacing="0" >3</text>
+<rect x="603.8" y="268" width="106.8" height="16" rx="3" fill="#F0912F" fill-opacity="0.62"/>
+<text x="657.125" y="304" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#E7EAF2" text-anchor="middle" font-weight="400" letter-spacing="0" >3</text>
+<rect x="712.5" y="268" width="507.5" height="16" rx="3" fill="#F0912F" fill-opacity="1.0"/>
+<text x="966.25" y="304" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#E7EAF2" text-anchor="middle" font-weight="400" letter-spacing="0" >14</text>
+<text x="60" y="362" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="15" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" >lnzip.de#dtSqVX3Iffaw1qDNMyVpMFUm2npgtXig</text>
+<text x="1220" y="362" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8B93A8" text-anchor="end" font-weight="400" letter-spacing="0" >measured by encoding each prefix with the standard model</text>
+</svg>

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="lnzip: a 111-character URL becomes a 31-character link, lnzip.de#QIIi0m8cyIAOLtQc25p20Vj7Q4wZ78A">
+<title>lnzip: a 111-character URL becomes a 31-character link, lnzip.de#QIIi0m8cyIAOLtQc25p20Vj7Q4wZ78A</title>
+<rect width="1280" height="420" rx="12" fill="#EEF0F5"/>
+<line x1="168" y1="40" x2="168" y2="380" stroke="#C9CEDB"/>
+<text x="186" y="70" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="3" >LNZIP</text>
+<text x="186" y="138" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="50" fill="#141726">The link <tspan fill="#C25A05">is</tspan> the URL, compressed.</text>
+<text x="186" y="176" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="0" >No database, no expiry, no record of where anyone went.</text>
+<text x="150" y="246" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="16" fill="#141726" text-anchor="end" font-weight="700" letter-spacing="0" >111</text>
+<text x="150" y="264" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="1.5" >CHARS</text>
+<rect x="174" y="222" width="1066" height="40" rx="4" fill="#F7F8FB" stroke="#C9CEDB"/>
+<text x="186" y="247" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.2" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="0" >https://www.amazon.com/s?k=mechanical+keyboard&amp;utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=black_friday</text>
+<path d="M198,276 v26 m-7,-8 l7,8 l7,-8" fill="none" stroke="#5A6178" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="220" y="296" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#5A6178" text-anchor="start" font-weight="400" letter-spacing="0" >compress, locally, with a frozen model</text>
+<text x="150" y="350" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="16" fill="#C25A05" text-anchor="end" font-weight="700" letter-spacing="0" >31</text>
+<text x="150" y="368" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" fill="#5A6178" text-anchor="end" font-weight="400" letter-spacing="1.5" >CHARS</text>
+<text x="186" y="356" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="30" fill="#141726">lnzip.de#<tspan fill="#C25A05">QIIi0m8cyIAOLtQc25p20Vj7Q4wZ78A</tspan></text>
+</svg>

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="342" viewBox="0 0 1280 342" role="img" aria-label="EACH IDEA, IN ORDER — % OF ORIGINAL">
+<title>EACH IDEA, IN ORDER — % OF ORIGINAL</title>
+<rect width="1280" height="342" rx="12" fill="#12141C"/>
+<text x="60" y="50" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" fill="#8B93A8" text-anchor="start" font-weight="400" letter-spacing="2.5" >EACH IDEA, IN ORDER — % OF ORIGINAL</text>
+<line x1="530.0" y1="70" x2="530.0" y2="294" stroke="#2A2F3E" stroke-width="1"/>
+<text x="530.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >0%</text>
+<line x1="740.0" y1="70" x2="740.0" y2="294" stroke="#2A2F3E" stroke-width="1"/>
+<text x="740.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >20%</text>
+<line x1="950.0" y1="70" x2="950.0" y2="294" stroke="#2A2F3E" stroke-width="1"/>
+<text x="950.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >40%</text>
+<line x1="1160.0" y1="70" x2="1160.0" y2="294" stroke="#2A2F3E" stroke-width="1"/>
+<text x="1160.0" y="312" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" fill="#8B93A8" text-anchor="middle" font-weight="400" letter-spacing="0" >60%</text>
+<text x="512" y="96" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#8B93A8" text-anchor="end" font-weight="400" letter-spacing="0" >order-2 character model</text>
+<path d="M530,82 H1132.9 Q1136.9,82 1136.9,86 V96 Q1136.9,100 1132.9,100 H530 Z" fill="#5A6178"/>
+<text x="1146.9" y="96" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" >57.8%</text>
+<text x="512" y="140" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#8B93A8" text-anchor="end" font-weight="400" letter-spacing="0" >+ components coded separately</text>
+<path d="M530,126 H1127.65 Q1131.65,126 1131.65,130 V140 Q1131.65,144 1127.65,144 H530 Z" fill="#5A6178"/>
+<text x="1141.65" y="140" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" >57.3%   −0.5</text>
+<text x="512" y="184" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#8B93A8" text-anchor="end" font-weight="400" letter-spacing="0" >+ whole-token dictionaries</text>
+<path d="M530,170 H981.7 Q985.7,170 985.7,174 V184 Q985.7,188 981.7,188 H530 Z" fill="#5A6178"/>
+<text x="995.7" y="184" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" >43.4%   −13.9</text>
+<text x="512" y="228" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#8B93A8" text-anchor="end" font-weight="400" letter-spacing="0" >+ shared sub-word dictionary</text>
+<path d="M530,214 H942.85 Q946.85,214 946.85,218 V228 Q946.85,232 942.85,232 H530 Z" fill="#5A6178"/>
+<text x="956.85" y="228" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#E7EAF2" text-anchor="start" font-weight="400" letter-spacing="0" >39.7%   −3.7</text>
+<text x="512" y="272" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="15" fill="#E7EAF2" text-anchor="end" font-weight="700" letter-spacing="0" >+ tuned dictionary sizes</text>
+<path d="M530,258 H851.5 Q855.5,258 855.5,262 V272 Q855.5,276 851.5,276 H530 Z" fill="#F0912F"/>
+<text x="865.5" y="272" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#E7EAF2" text-anchor="start" font-weight="700" letter-spacing="0" >31%   −8.7</text>
+</svg>
