@@ -322,8 +322,8 @@ footer code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
       </div>
       <p class="hint" id="alphaNote"></p>
       <p class="hint" id="modelNote">Tiny is built into this page and answers instantly.
-        Standard compresses a little better and is fetched once, then cached — but a
-        link made with it can only be opened by someone who fetches it too.</p>
+        Standard compresses a little better and is fetched once, then cached — and
+        whoever opens a link made with it fetches it the same way, on their own.</p>
     </form>
   </div>
 
@@ -430,6 +430,24 @@ const WASM_B64 = "";
     return location.origin + path;
   }
 
+  // The models this page can fetch, by id. A link names its model, so a
+  // reader needs whichever one it was made with — not whichever one this page
+  // happens to have loaded. Published ids never change, so neither does this.
+  const MODEL_FILES = { 1: 'standard.lnzm' };
+
+  // Make sure `lz` can decode with model `id`, fetching it if it is one this
+  // page publishes. Resolves to the number of bytes fetched, 0 if none were.
+  async function ensureModel(lz, id) {
+    if (lz.hasModel(id)) return 0;
+    const file = MODEL_FILES[id];
+    if (!file) throw new Error('this code was made with model ' + id + ', which this page does not have');
+    const res = await fetch(file);
+    if (!res.ok) throw new Error('model ' + id + ' is not published beside this page');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    lz.loadModel(bytes);
+    return bytes.length;
+  }
+
   // ---- resolve mode -------------------------------------------------
   async function resolve(code) {
     $('resolve').hidden = false;
@@ -445,6 +463,9 @@ const WASM_B64 = "";
 
     let out;
     try {
+      const id = lz.codeModel(code);
+      if (!lz.hasModel(id)) state.textContent = 'Fetching the model this link was made with…';
+      await ensureModel(lz, id);
       out = lz.decode(code);
     } catch (e) {
       state.textContent = 'That code does not decode: ' + e.message;
@@ -553,20 +574,15 @@ const WASM_B64 = "";
     // opens a link made with it has to fetch it too. It is cached by the
     // browser and never changes — a published model id is frozen — so the cost
     // is paid once.
-    let stdLoaded = false;
     const note = $('modelNote');
     const setModel = async (wantStd) => {
       if (!wantStd) { slot = 0; press('setTiny', true); press('setStd', false); run(); return; }
-      if (!stdLoaded) {
+      if (!lz.hasModel(1)) {
         note.textContent = 'Fetching the standard model…';
         try {
-          const res = await fetch('standard.lnzm');
-          if (!res.ok) throw new Error('it is not published beside this page');
-          const bytes = new Uint8Array(await res.arrayBuffer());
-          lz.loadModel(bytes);
-          stdLoaded = true;
-          note.textContent = 'Standard model loaded (' +
-            Math.round(bytes.length / 1024) + ' KB). Links made with it need it to open.';
+          const bytes = await ensureModel(lz, 1);
+          note.textContent = 'Standard model loaded (' + Math.round(bytes / 1024) +
+            ' KB). Whoever opens a link made with it fetches it too, once.';
         } catch (e) {
           note.textContent = 'The standard model could not be loaded: ' + e.message +
             '. Staying on the model built into this page.';
@@ -671,7 +687,7 @@ const WASM_B64 = "";
     let dest = '';
     const expandErr = $('expandErr');
 
-    function expand() {
+    async function expand() {
       const raw = $('incode').value.trim();
       $('expandOut').hidden = true;
       expandErr.hidden = true;
@@ -684,6 +700,7 @@ const WASM_B64 = "";
 
       let out;
       try {
+        await ensureModel(lz, lz.codeModel(code));
         out = lz.decode(code);
       } catch (e) {
         expandErr.hidden = false;

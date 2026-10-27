@@ -177,6 +177,22 @@ fn wasm_encode(len as i64, alph as i64, slot as i64) as i64 {
 // This runs on whatever was in the address bar, so every failure is an error
 // and none of them is a guess. A fragment that is not one of ours comes back
 // negative rather than as some plausible URL.
+// Which model the code in the input buffer was made with, or a negative
+// errno. Read before decoding, so the page can fetch that model first rather
+// than answer a link with "made with a different model".
+fn wasm_code_model(len as i64, alph as i64) as i64 {
+    let is i64 as n = cast(i64, len);
+    if (n <= 0)  { return cast(i64, errno.E_BADPAYLOAD); }
+    if (n > CAP) { return cast(i64, errno.E_SPACE); }
+    if (alph < 0 || alph >= alpha.NALPHA) { return errno.E_BADCHAR; }
+    let is *cb.Bytes as p = _pay();
+    cb.bytes_reset(p);
+    if (cb.bytes_reserve(p, CAP) < 0) { return cast(i64, errno.E_OOM); }
+    let is i64 as pn = alpha.alpha_decode(alph, cast(*u8, &_IN), n, p.ptr, CAP);
+    if (pn < 0) { return cast(i64, pn); }
+    return codec.lnz_model_of(p.ptr, pn);
+}
+
 fn wasm_decode(len as i64, alph as i64) as i64 {
     if (_ready == 0) {
         let is i64 as rc1 = wasm_init();
@@ -262,6 +278,7 @@ fn main() as i32 {
     keep = keep + cast(i64, fn_ptr(wasm_verify_model));
     keep = keep + cast(i64, fn_ptr(wasm_encode));
     keep = keep + cast(i64, fn_ptr(wasm_decode));
+    keep = keep + cast(i64, fn_ptr(wasm_code_model));
     keep = keep + cast(i64, fn_ptr(wasm_scheme_ok));
     keep = keep + cast(i64, fn_ptr(wasm_nalpha));
     keep = keep + cast(i64, fn_ptr(wasm_alpha_bits));

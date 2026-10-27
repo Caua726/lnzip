@@ -102,6 +102,30 @@ function check(name, ok, detail) {
     check('oversize refused', true);
   }
 
+  // A link made with the fetched model, opened by a page that has never
+  // loaded it. The code names its model, so the reader can tell which one to
+  // fetch instead of being told the code is for a different model.
+  const STD = process.argv[3] || 'build/standard.lnzm';
+  if (fs.existsSync(STD)) {
+    const stdBytes = new Uint8Array(fs.readFileSync(STD));
+    const maker = await globalThis.lnzip.load(fs.readFileSync(WASM));
+    const stdId = maker.loadModel(stdBytes);
+    const url = 'https://github.com/torvalds/linux/issues/123';
+    const tinyCode = maker.encode(url, { slot: 0 });
+    for (const a of maker.alphabets) {
+      const code = maker.encode(url, { alphabet: a.index, slot: 1 });
+      const reader = await globalThis.lnzip.load(fs.readFileSync(WASM));
+      check(a.name + ': code names the fetched model', reader.codeModel(code) === stdId,
+            'named ' + reader.codeModel(code));
+      check(a.name + ': not yet decodable without it', !reader.hasModel(stdId));
+      reader.loadModel(stdBytes);
+      check(a.name + ': decodes once it is loaded', reader.decode(code).url === url);
+    }
+    check('built-in code names the built-in model', maker.codeModel(tinyCode) === maker.modelId);
+  } else {
+    check('standard model present for the fetch test', false, STD + ' missing');
+  }
+
   console.log('web: ' + URLS.length + ' urls, ' + raw + ' B -> ' +
               [...totals].map(([n, v]) => v + ' ' + n).join(' / '));
   if (failed === 0) console.log('web: wasm boundary, alphabets and scheme gate all hold');

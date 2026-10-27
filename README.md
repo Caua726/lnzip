@@ -32,7 +32,8 @@ when the table does. lnzip has no table — the code **is** the URL, compressed.
 ## Try it
 
 Open **[lnzip.de](https://lnzip.de)**, paste a URL, get a link and its QR code.
-Or paste somebody else's link to read where it goes before following it.
+Or paste somebody else's link to read where it goes before following it. A link
+made with the standard model fetches it on its own when someone opens it.
 
 <p align="center">
   <picture>
@@ -66,6 +67,9 @@ dtSwnunEffaw1qDNMyWc
 $ ./build/lnzip decode dtSwnunEffaw1qDNMyWc
 https://github.com/torvalds/linux/issues/123
 
+$ ./build/lnzip decode QIIi0m8cyIAOLtQc25p20Vj7Q4wZ78A     # made with the tiny model
+https://www.amazon.com/s?k=mechanical+keyboard&utm_source=newsletter&utm_medium=email&utm_campaign=black_friday
+
 $ ./build/lnzip encode 'https://github.com/torvalds/linux/issues/123' -a cjk
 段変覧剽讬孪儴脥甀
 ```
@@ -73,11 +77,15 @@ $ ./build/lnzip encode 'https://github.com/torvalds/linux/issues/123' -a cjk
 | command | |
 |---|---|
 | `lnzip encode <url> [-a alphabet] [-v]` | compress; `-v` reports sizes on stderr |
-| `lnzip decode <code>` | decompress; the alphabet is detected |
+| `lnzip decode <code>` | decompress; the alphabet and the model are both detected |
 | `lnzip info` | the model's id, tier, size and integrity |
-| `-m <model.lnzm>` | the model to use; `$LNZIP_MODEL` otherwise |
+| `-m <model.lnzm>` | the model to encode with; `$LNZIP_MODEL` otherwise |
 
-With no model at all the tool still runs, against a uniform built-in one that
+A code names the model it was made with, so `decode` opens that one: the file
+given by `-m` if it is the right model, otherwise `lnzip-<tier>-<id>.lnzm` from
+the same directory, from `$LNZIP_MODELS`, or from `models/`.
+
+With no model at all `encode` still runs, against a uniform built-in one that
 compresses nothing. It exists so the codec works before a corpus does, and
 encoding with it says so on stderr.
 

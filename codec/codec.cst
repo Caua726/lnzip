@@ -993,6 +993,16 @@ fn lnz_encode(src as *u8, len as i64, m as *model.Model, out as *bytes.Bytes) as
 // error rather than a truncation. The page calls this on whatever was in the
 // address bar, so "decoded to something implausible" has to be a refusal and
 // never a long loop or a write past the end of a buffer.
+// The model id a payload names, read without any model — the id's
+// probabilities are hardcoded for exactly this. It is what turns E_NOMODEL
+// from "no" into "go and get model N": a link has to be readable by someone
+// who did not choose the model it was made with.
+fn lnz_model_of(src as *u8, slen as i64) as i64 {
+    let is rc.Dec as d with mut;
+    rc.dec_init(&d, src, slen);
+    return _dec_model_id(&d);
+}
+
 fn lnz_decode(src as *u8, slen as i64, m as *model.Model, out as *u8, max as i64) as i64 {
     let is rc.Dec as d with mut;
     rc.dec_init(&d, src, slen);

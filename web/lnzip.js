@@ -122,6 +122,16 @@ async function load(source) {
   // exactly one place.
   const ALPHABETS = ['base32', 'base64url', 'emoji', 'cjk'];
 
+  let loadedId = -1;              // the model in the second slot, if any
+
+  // The code in the input buffer's alphabet, detected or as given.
+  const alphabetOf = (bytes, alphabet) => {
+    if (alphabet !== null) return alphabet;
+    const a = call(ex.wasm_alpha_detect, bytes.length);
+    if (a < 0) throw new Error('this is not written in any alphabet lnzip uses');
+    return a;
+  };
+
   return {
     modelId: call(ex.wasm_model_id),
     maxUrl: call(ex.wasm_max_url),
@@ -139,7 +149,23 @@ async function load(source) {
       const id = call(ex.wasm_load_model, bytes.length);
       if (id < 0) throw new Error(describe(id));
       const bad = call(ex.wasm_verify_model);
-      if (bad !== 0) throw new Error('that model failed its own integrity check');
+      if (bad !== 0) { loadedId = -1; throw new Error('that model failed its own integrity check'); }
+      loadedId = id;
+      return id;
+    },
+
+    // Whether a code made with model `id` can be decoded right now.
+    hasModel(id) { return id === this.modelId || id === loadedId; },
+
+    // The model a code was made with, read before decoding it: a link names
+    // its model, and whoever opens it may not have that one loaded yet.
+    codeModel(code, { alphabet = null } = {}) {
+      const bytes = enc.encode(code);
+      if (bytes.length === 0) throw new Error('empty code');
+      if (bytes.length > cap) throw new Error('that code is too long');
+      inBuf().set(bytes);
+      const id = call(ex.wasm_code_model, bytes.length, alphabetOf(bytes, alphabet));
+      if (id < 0) throw new Error(describe(id));
       return id;
     },
 
@@ -167,12 +193,7 @@ async function load(source) {
       if (bytes.length === 0) throw new Error('empty code');
       if (bytes.length > cap) throw new Error('that code is too long');
       inBuf().set(bytes);
-      let a = alphabet;
-      if (a === null) {
-        a = call(ex.wasm_alpha_detect, bytes.length);
-        if (a < 0) throw new Error('this is not written in any alphabet lnzip uses');
-      }
-      const n = call(ex.wasm_decode, bytes.length, a);
+      const n = call(ex.wasm_decode, bytes.length, alphabetOf(bytes, alphabet));
       if (n < 0) throw new Error(describe(n));
       const url = dec.decode(outBuf().slice(0, n));
       return { url, safe: call(ex.wasm_scheme_ok, n) === 1 };

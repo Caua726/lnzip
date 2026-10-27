@@ -194,6 +194,8 @@ fn main() as i32 {
     if (codec.lnz_decode(pay.ptr, pay.len, &bi, cast(*u8, &hout), 9000) != errno.E_NOMODEL) {
         return 65;
     }
+    // And the payload says which model it wants, so a reader can go and get it.
+    if (codec.lnz_model_of(pay.ptr, pay.len) != 4102) { return 68; }
     // Past the ceiling is refused at write time.
     if (model.model_write(MODEL_PATH, 4103, model.TIER_TINY, probs,
                           cast(*u8, &dofs), cast(*i64, &dofs)) != errno.E_BADMODEL) { return 66; }
@@ -215,6 +217,10 @@ fn main() as i32 {
     if (codec.lnz_decode(pay.ptr, pay.len, &bi, cast(*u8, &out), 9000) != errno.E_NOMODEL) {
         return 41;
     }
+    // Refused, but not mute: the payload names the model that would read it.
+    // Without this a reader holding the wrong model can only say no; with it,
+    // the page and the CLI fetch or open the right one.
+    if (codec.lnz_model_of(pay.ptr, pay.len) != 3) { return 44; }
 
     // ── 4. truncation is reported, not guessed at ─────────────────
     cb.bytes_reset(&pay);
