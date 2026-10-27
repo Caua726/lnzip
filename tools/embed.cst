@@ -2,7 +2,7 @@
 // tools/embed.cst — turn a model file into Caustic source.
 //
 //   caustic-mk build embed
-//   ./build/embed models/tiny.lnzm wasm/model_embedded.cst
+//   ./build/embed models/lnzip-tiny-0.lnzm wasm/model_embedded.cst
 //
 // Level 6 rather than 9, deliberately: most of a model is a probability table
 // whose untouched contexts are all the same two bytes, so it deflates to six

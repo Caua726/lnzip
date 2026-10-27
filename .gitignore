@@ -7,6 +7,7 @@ build/
 # models/MANIFEST, which IS tracked — a link whose model was lost is a dead
 # link, so the hashes have to be in the repository even when the bytes are not.
 models/*.lnzm
+models/*.part
 
 # Generated from the model by tools/embed.cst, ~300 KB of escaped bytes.
 wasm/model_embedded.cst

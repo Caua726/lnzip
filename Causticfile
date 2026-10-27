@@ -6,6 +6,8 @@ author "Cauã Alvarenga Neves"
 //
 //   caustic-mk run test            every suite
 //   caustic-mk run test-opt        the same, through the optimizing backend
+//   caustic-mk run models          fetch the published models, check their hashes
+//   caustic-mk run web             the page, for lnzip.de and for file://
 //   caustic-mk run clean           build artifacts
 //   caustic-mk run distclean       generated assembly and objects too
 //
@@ -78,18 +80,29 @@ target "bundle" {
 script "web" {
     "caustic-mk build embed"
     "caustic-mk build bundle"
-    "./build/embed models/enpt-tiny.lnzm wasm/model_embedded.cst"
+    "./build/embed models/lnzip-tiny-0.lnzm wasm/model_embedded.cst"
     "caustic --target=wasm32-wasi --path .caustic/deps -q wasm/lnzip_wasm.cst -o build/lnzip.wasm"
     "cp web/index.html web/lnzip.js web/qr.js build/"
-    "cp models/enpt2.lnzm build/standard.lnzm"
+    "cp models/lnzip-standard-1.lnzm build/standard.lnzm"
     "./build/bundle web/index.html build/lnzip.wasm build/lnzip.html"
     "mkdir -p build/site"
     "cp web/index.html web/lnzip.js web/qr.js web/_headers build/site/"
     "cp build/lnzip.wasm build/site/"
-    "cp models/enpt2.lnzm build/site/standard.lnzm"
+    "cp models/lnzip-standard-1.lnzm build/site/standard.lnzm"
 }
 
 // ── Scripts ──────────────────────────────────────────────────────────
+
+// The published models are release assets, not source. This fetches them and
+// refuses them unless they hash to what models/MANIFEST says: a model that is
+// one byte off decodes every link into a different URL.
+script "models" {
+    "curl -fL --create-dirs -o models/lnzip-tiny-0.lnzm.part https://github.com/Caua726/lnzip/releases/download/models/lnzip-tiny-0.lnzm"
+    "mv models/lnzip-tiny-0.lnzm.part models/lnzip-tiny-0.lnzm"
+    "curl -fL --create-dirs -o models/lnzip-standard-1.lnzm.part https://github.com/Caua726/lnzip/releases/download/models/lnzip-standard-1.lnzm"
+    "mv models/lnzip-standard-1.lnzm.part models/lnzip-standard-1.lnzm"
+    "awk '/^[0-9]/ { print $3 \"  models/\" $5 }' models/MANIFEST | sha256sum -c"
+}
 
 // `build run` rather than a bare `caustic`: the dependency is resolved by the
 // build system, not by the script, so the clone happens once and the tag pin

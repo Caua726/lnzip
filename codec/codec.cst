@@ -495,6 +495,8 @@ fn _count_toks(m as *model.Model, n0 as *i64, n1 as *i64, src as *u8, off as i64
     }
 }
 
+// ===================== QUERY =========================================
+//
 // The query, which is where most of the bytes are: parameters split on '&',
 // each split at its FIRST '=' into a key and an optional value. First, not
 // last, because a value may legally contain one — and splitting there is what
@@ -604,6 +606,11 @@ fn _count_query(m as *model.Model, n0 as *i64, n1 as *i64,
         i = i + 1;
     }
 }
+
+// ===================== STRUCTURAL GRAMMAR ============================
+//
+// The components in order, each behind the flag that says whether the URL has
+// it: scheme, authority, host, port, path, query, fragment.
 
 fn _flag(e as *rc.Enc, m as *model.Model, which as i64, bit as i64) as void {
     rc.enc_bit(e, cast(i64, m.probs[ctx.CTX_SFLAG + which]), bit);
@@ -850,7 +857,8 @@ fn _count_raw(src as *u8, len as i64, n0 as *i64, n1 as *i64) as void {
     }
 }
 
-
+// ===================== TRAINER WALK ==================================
+//
 // Visit every dictionary token in the URL, in the order the encoder codes
 // them, reporting each to `sink` as fn(ctx, dictid, src, off, len).
 //

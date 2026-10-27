@@ -1,3 +1,11 @@
+> **The original plan, in Portuguese, kept as written.** The phases and their
+> gates still describe how the work was ordered, but the code moved on in a few
+> places: the redirect server (P8) became a static page with the code in the
+> fragment, `codec/{grammar,encode,decode}` became one `codec/codec.cst`,
+> `fmt/{b64url,uni}` became `fmt/alpha.cst` with four alphabets, and the
+> benchmark is `tools/corpus.cst`, which measures lnzip alone. The README is
+> the current state.
+
 # lnzip — compressor lossless especializado em URLs
 
 ## Context
